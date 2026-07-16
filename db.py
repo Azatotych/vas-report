@@ -5,9 +5,10 @@ DB_PATH = Path(__file__).parent / "data.db"
 
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 5000")
     return conn
 
 
@@ -125,6 +126,100 @@ def init_db():
             certificate_filename TEXT DEFAULT '',
             points_taken REAL DEFAULT 0
         );
+
+        -- ── Личный план работы (часы, docx) ──────────────────────────────────
+
+        CREATE TABLE IF NOT EXISTS work_plans (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL REFERENCES users(id),
+            year INTEGER NOT NULL,
+            hours_articles INTEGER DEFAULT 0,
+            hours_operatives INTEGER DEFAULT 0,
+            hours_naryady INTEGER DEFAULT 0,
+            hours_guk INTEGER DEFAULT 0,
+            fio_genitive TEXT DEFAULT '',
+            approver_position TEXT DEFAULT 'Начальник 5 научно-исследовательского отдела',
+            approver_rank TEXT DEFAULT 'подполковник',
+            approver_name TEXT DEFAULT 'С.Тихонов',
+            created_at TEXT DEFAULT (datetime('now')),
+            UNIQUE(user_id, year)
+        );
+
+        CREATE TABLE IF NOT EXISTS plan_nirs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            plan_id INTEGER NOT NULL REFERENCES work_plans(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            deadline_month INTEGER,
+            hours_year INTEGER DEFAULT 0,
+            sort_order INTEGER DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS plan_months (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            plan_id INTEGER NOT NULL REFERENCES work_plans(id) ON DELETE CASCADE,
+            month INTEGER NOT NULL,
+            fund_hours INTEGER DEFAULT 0,
+            vacation_days INTEGER DEFAULT 0,
+            hours_articles INTEGER DEFAULT 0,
+            hours_operatives INTEGER DEFAULT 0,
+            hours_naryady INTEGER DEFAULT 0,
+            hours_guk INTEGER DEFAULT 0,
+            UNIQUE(plan_id, month)
+        );
+
+        CREATE TABLE IF NOT EXISTS plan_nir_months (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nir_id INTEGER NOT NULL REFERENCES plan_nirs(id) ON DELETE CASCADE,
+            month INTEGER NOT NULL,
+            hours INTEGER DEFAULT 0,
+            UNIQUE(nir_id, month)
+        );
+
+        CREATE TABLE IF NOT EXISTS eternal_operatives (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL REFERENCES users(id),
+            name TEXT NOT NULL,
+            goal TEXT DEFAULT '',
+            tasks TEXT DEFAULT '',
+            result TEXT DEFAULT '',
+            doc TEXT DEFAULT '',
+            hours_month INTEGER DEFAULT 0,
+            is_active INTEGER DEFAULT 1,
+            sort_order INTEGER DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS plan_reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL REFERENCES users(id),
+            year INTEGER NOT NULL,
+            month INTEGER NOT NULL,
+            docx_path TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            UNIQUE(user_id, year, month)
+        );
+
+        CREATE TABLE IF NOT EXISTS plan_report_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            report_id INTEGER NOT NULL REFERENCES plan_reports(id) ON DELETE CASCADE,
+            kind TEXT NOT NULL,
+            ref_id INTEGER,
+            name TEXT DEFAULT '',
+            goal TEXT DEFAULT '',
+            tasks TEXT DEFAULT '',
+            result TEXT DEFAULT '',
+            hours INTEGER DEFAULT 0
+        );
+
+        -- Закрытые («прочитанные») уведомления. Уведомления вычисляются из статусов
+        -- отчётов; здесь запоминаем, какие пользователь скрыл, по (отчёт, вид).
+        CREATE TABLE IF NOT EXISTS dismissed_notifications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL REFERENCES users(id),
+            report_id INTEGER NOT NULL,
+            kind TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now')),
+            UNIQUE(user_id, report_id, kind)
+        );
     """)
 
     # ── Seed users from old profile table (first run on existing DB) ─────────
@@ -163,6 +258,12 @@ def init_db():
         if col not in mr_cols:
             conn.execute(f"ALTER TABLE monthly_reports ADD COLUMN {col} {defn}")
             conn.commit()
+
+    # users: add active (мягкое удаление — данные остаются в архиве)
+    u_cols = [r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
+    if 'active' not in u_cols:
+        conn.execute("ALTER TABLE users ADD COLUMN active INTEGER DEFAULT 1")
+        conn.commit()
 
     # orders: add user_id, executor
     cols = [r[1] for r in conn.execute("PRAGMA table_info(orders)").fetchall()]

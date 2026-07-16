@@ -3,29 +3,38 @@ let _editingUserId = null;
 
 async function loadEmployees() {
   const data = await api('GET', '/supervisor/employees').catch(() => []);
-  const tbody = document.getElementById('employees-table-body');
+  const wrap = document.getElementById('employees-list');
+  document.getElementById('employee-archive-area').innerHTML = '';
   if (!data.length) {
-    tbody.innerHTML = '<tr><td colspan="5" class="empty-state">Нет сотрудников</td></tr>';
+    wrap.innerHTML = '<div class="card"><div class="card-body"><div class="empty-state">Нет сотрудников</div></div></div>';
     return;
   }
-  tbody.innerHTML = data.map(u => {
+  wrap.innerHTML = `<div class="emp-list">` + data.map(u => {
     const name = [u.last_name, u.first_patronymic].filter(Boolean).join(' ') || u.username;
     const latest = u.reports && u.reports[0];
-    const statusCell = latest
-      ? `${_statusBadge(latest.status)}`
-      : '<span style="color:#aaa;font-size:11px">—</span>';
-    return `<tr>
-      <td><b>${name}</b><div style="font-size:11px;color:#888">${u.username}</div></td>
-      <td style="font-size:12px;color:#555">${u.position || '—'}</td>
-      <td style="text-align:center">${u.reports ? u.reports.length : 0}</td>
-      <td>${statusCell}</td>
-      <td style="white-space:nowrap">
-        <button class="btn btn-secondary btn-sm" onclick="showEmployeeArchive(${u.id},'${name.replace(/'/g,"\\'")}')">📁 Архив</button>
-        <button class="btn btn-secondary btn-sm" onclick="showUserModal(${JSON.stringify(u).replace(/"/g,'&quot;')})">✏</button>
-        <button class="btn btn-danger btn-sm" onclick="deleteUser(${u.id})">✕</button>
-      </td>
-    </tr>`;
-  }).join('');
+    const pts = latest ? (latest.total_points || 0) : 0;
+    const pct = Math.min(100, pts / SCORE_CAP * 100);
+    const status = latest ? latest.status : 'none';
+    const meta = (typeof _DASH_STATUS !== 'undefined' && _DASH_STATUS[status]) || { label: 'Не подан', dot: 'var(--text-5)' };
+    const quick = latest && latest.status === 'submitted'
+      ? `<button class="btn btn-primary btn-sm" onclick="approveReport(${latest.id},'employees')">${ic('check')}</button>
+         <button class="btn btn-danger btn-sm" onclick="openRejectModal(${latest.id},'employees')">${ic('close')}</button>` : '';
+    const open = latest
+      ? `<button class="btn btn-secondary btn-sm" onclick="openReview(${latest.id},'employees')">Открыть</button>` : '';
+    return `<div class="emp-row">
+      <div class="rank-avatar">${_initials(u)}</div>
+      <div class="emp-name"><div>${name}</div><div class="rank-sub">${u.rank || u.position || '—'} · ${u.username}</div></div>
+      <div class="emp-bar-wrap"><div class="rank-bar" style="width:${pct}%;background:${pts > SCORE_CAP ? 'var(--danger)' : 'var(--gold)'}"></div></div>
+      <div class="rank-pts">${round1(pts)}<span style="color:var(--text-5)">/30</span></div>
+      <div class="emp-reports">${u.reports ? u.reports.length : 0} отч.</div>
+      <div class="emp-status"><span class="status-dot" style="background:${meta.dot}"></span>${meta.label}</div>
+      <div class="emp-actions">
+        ${quick}${open}
+        <button class="btn btn-secondary btn-sm" onclick="showUserModal(${JSON.stringify(u).replace(/"/g,'&quot;')})" title="Изменить">${ic('edit')}</button>
+        <button class="btn btn-danger btn-sm" onclick="deleteUser(${u.id})" title="Удалить">${ic('trash')}</button>
+      </div>
+    </div>`;
+  }).join('') + `</div>`;
 }
 
 async function showEmployeeArchive(userId, name) {
@@ -41,7 +50,7 @@ async function showEmployeeArchive(userId, name) {
   ).join('');
   area.innerHTML = `
     <div class="card" style="margin-top:12px">
-      <div class="card-header"><div class="card-title">📁 Отчёты: ${name}</div></div>
+      <div class="card-header"><div class="card-title">${ic('folder')} Отчёты: ${name}</div></div>
       <div class="card-body">
         <div class="month-chips" style="margin-bottom:12px">${chips}</div>
         <div id="sv-archive-detail"></div>
@@ -63,12 +72,12 @@ async function showSvArchiveDetail(id) {
     const pts = o.level === 'academy' ? WEIGHTS.order_academy : WEIGHTS.order_higher;
     const cfn = o.confirmation_filename;
     const fileBtn = cfn
-      ? `<button class="file-preview-btn" onclick="previewDocx('${cfn}','Подтверждайка №${o.number}')">📎 подтверждайка</button>` : '';
+      ? `<button class="file-preview-btn" onclick="previewDocx('${cfn}','Подтверждайка №${o.number}')">${ic('paperclip')} подтверждайка</button>` : '';
     return `<div class="score-item"><div><div>${o.level === 'academy' ? 'Задание ВАС' : 'Задание вышестоящего'} · №${o.number}</div><div class="score-desc">${o.title}</div>${fileBtn}</div><div class="score-pts">${pts} б.</div></div>`;
   }).join('');
   const swRows = (r.software || []).map(s => {
     const fileBtn = s.docx_filename
-      ? `<button class="file-preview-btn" onclick="previewDocx('${s.docx_filename}','Ведомость')">📄 ведомость</button>` : '';
+      ? `<button class="file-preview-btn" onclick="previewDocx('${s.docx_filename}','Ведомость')">${ic('doc')} ведомость</button>` : '';
     return `<div class="score-item"><div><div>ПО: ${s.title}</div><div class="score-desc">№${s.certificate_number}</div>${fileBtn}</div><div class="score-pts">${s.points_taken} б.</div></div>`;
   }).join('');
   const artRows = (r.articles || []).map(a =>
@@ -76,7 +85,7 @@ async function showSvArchiveDetail(id) {
   ).join('');
   const confRows = (r.conferences || []).map(c => {
     const fileBtn = c.certificate_filename
-      ? `<button class="file-preview-btn" onclick="previewDocx('${c.certificate_filename}','Сертификат')">📎 сертификат</button>` : '';
+      ? `<button class="file-preview-btn" onclick="previewDocx('${c.certificate_filename}','Сертификат')">${ic('paperclip')} сертификат</button>` : '';
     return `<div class="score-item"><div><div>${c.title || 'Доклад на конференции'}</div><div class="score-desc">п.24</div>${fileBtn}</div><div class="score-pts">${c.points_taken} б.</div></div>`;
   }).join('');
 
@@ -88,10 +97,10 @@ async function showSvArchiveDetail(id) {
       ${_statusBadge(r.status)}
       ${comment}
       <div style="margin-left:auto;display:flex;gap:6px">
-        <button class="btn btn-primary btn-sm" onclick="approveReport(${id},true)">✓ Утвердить</button>
-        <button class="btn btn-danger btn-sm" onclick="openRejectModal(${id},true)">✕ Отклонить</button>
-        <a href="/api/reports/${id}/export" class="btn btn-secondary btn-sm">⬇ .xlsx</a>
-        <button class="btn btn-secondary btn-sm" onclick="supervisorDeleteReport(${id})">🗑</button>
+        <button class="btn btn-primary btn-sm" onclick="approveReport(${id},true)">${ic('check')} Утвердить</button>
+        <button class="btn btn-danger btn-sm" onclick="openRejectModal(${id},true)">${ic('close')} Отклонить</button>
+        <a href="/api/reports/${id}/export" class="btn btn-secondary btn-sm">${ic('download')} .xlsx</a>
+        <button class="btn btn-secondary btn-sm" onclick="supervisorDeleteReport(${id})">${ic('trash')}</button>
       </div>
     </div>
     ${orderRows}${swRows}${artRows}${confRows}
@@ -100,22 +109,34 @@ async function showSvArchiveDetail(id) {
 }
 
 // ─── APPROVE / REJECT ─────────────────────────────────────────────────────
-async function approveReport(id, fromSvPanel) {
+async function approveReport(id, source) {
   if (!confirm('Утвердить отчёт?')) return;
-  await api('POST', `/supervisor/reports/${id}/approve`, { comment: '' });
-  if (fromSvPanel) {
-    // refresh chips
-    const chip = document.getElementById('svchip-' + id);
-    if (chip) showSvArchiveDetail(id);
-  } else {
-    showArchiveDetail(id);
-  }
+  try {
+    await api('POST', `/supervisor/reports/${id}/approve`, { comment: '' });
+    _refreshAfterDecision(id, source);
+  } catch (e) { _decisionFailed(e, source); }
 }
 
-let _rejectFromSvPanel = false;
+// Отчёт мог исчезнуть (сотрудник отозвал) или месяц закрылся — без ошибок:
+function _decisionFailed(e, source) {
+  toast((e && e.message) ? e.message : 'Отчёт больше недоступен');
+  source = source === true ? 'sv' : (source || '');
+  if (source === 'employees') loadEmployees();
+  else if (source === 'review') nav(_reviewBack || 'dashboard');
+}
 
-function openRejectModal(id, fromSvPanel) {
-  _rejectFromSvPanel = !!fromSvPanel;
+function _refreshAfterDecision(id, source) {
+  source = source === true ? 'sv' : (source || '');
+  if (source === 'review') openReview(id, _reviewBack);
+  else if (source === 'employees') loadEmployees();
+  else if (source === 'sv') { if (document.getElementById('svchip-' + id)) showSvArchiveDetail(id); }
+  else showArchiveDetail(id);
+}
+
+let _rejectSource = '';   // '' (архив) | 'sv' (панель сотрудника) | 'review'
+
+function openRejectModal(id, source) {
+  _rejectSource = source === true ? 'sv' : (source || '');
   document.getElementById('reject-report-id').value = id;
   document.getElementById('reject-comment').value = '';
   document.getElementById('reject-modal').style.display = 'flex';
@@ -128,13 +149,11 @@ function closeRejectModal() {
 async function confirmReject() {
   const id = parseInt(document.getElementById('reject-report-id').value);
   const comment = document.getElementById('reject-comment').value.trim();
-  await api('POST', `/supervisor/reports/${id}/reject`, { comment });
   closeRejectModal();
-  if (_rejectFromSvPanel) {
-    showSvArchiveDetail(id);
-  } else {
-    showArchiveDetail(id);
-  }
+  try {
+    await api('POST', `/supervisor/reports/${id}/reject`, { comment });
+    _refreshAfterDecision(id, _rejectSource);
+  } catch (e) { _decisionFailed(e, _rejectSource); }
 }
 
 async function supervisorDeleteReport(id) {

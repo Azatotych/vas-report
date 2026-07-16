@@ -2,7 +2,11 @@
 <html lang="ru">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Результативность — ВАС</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Serif:wght@400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
@@ -11,11 +15,17 @@
 <div id="login-screen" class="login-screen">
   <div class="login-card">
     <div class="login-logo">
-      <div class="login-logo-icon">📊</div>
-      <div class="login-logo-title">Результативность — ВАС</div>
-      <div class="login-logo-sub">НИО-5 · Выберите аккаунт для входа</div>
+      <div class="login-logo-badge">Н5</div>
+      <div class="login-logo-title">Система учёта результативности</div>
+      <div class="login-logo-sub">ВАС · НИО-5</div>
     </div>
-    <div id="login-user-list"></div>
+    <div class="login-user-grid" id="login-user-list"></div>
+    <div class="login-footer">Без пароля · вход с рабочей станции подразделения <span id="login-version" class="login-version"></span></div>
+  </div>
+  <div class="login-credit">
+    <div class="login-credit-pre">Программное обеспечение создано силами</div>
+    <div class="login-credit-main">отдела перспективных образовательных технологий</div>
+    <div class="login-credit-org">Научно-исследовательский центр · Военная академия связи · НИО-5</div>
   </div>
 </div>
 
@@ -23,31 +33,35 @@
 <div class="app" id="app" style="display:none">
   <div class="sidebar">
     <div class="logo">
-      <div class="logo-title">Результативность</div>
-      <div class="logo-sub">ВАС · НИО-5</div>
+      <div class="logo-badge">Н5</div>
+      <div class="logo-text">Результативность<br>ВАС · НИО-5 <span id="sidebar-version" class="sidebar-version"></span></div>
     </div>
 
-    <!-- current user chip -->
-    <div class="sidebar-user" id="sidebar-user">
-      <span class="sidebar-user-icon" id="sidebar-user-icon">👤</span>
+    <div class="nav-section" id="nav-section-supervisor" style="display:none">Управление</div>
+    <div class="nav-item" id="nav-dashboard" style="display:none" onclick="nav('dashboard')"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h8v8H3z"/><path d="M13 3h8v5h-8z"/><path d="M13 12h8v9h-8z"/><path d="M3 15h8v6H3z"/></svg> Дашборд</div>
+    <div class="nav-item" id="nav-employees" style="display:none" onclick="nav('employees')"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 11a3.2 3.2 0 1 0 0-6.4 3.2 3.2 0 0 0 0 6.4z"/><path d="M3.5 20a6 6 0 0 1 12 0"/><path d="M16 5.2a3.2 3.2 0 0 1 0 6.2M17 20.2h3.5a6 6 0 0 0-4-5.6"/></svg> Сотрудники</div>
+    <div class="nav-section" id="nav-section-reports">Отчётность</div>
+    <div class="nav-item active" id="nav-submit" onclick="nav('submit')"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4h13A1.5 1.5 0 0 1 20 5.5v13A1.5 1.5 0 0 1 18.5 20h-13A1.5 1.5 0 0 1 4 18.5z"/><path d="M12 9v6M9 12h6"/></svg> Подать отчёт</div>
+    <div class="nav-item" id="nav-archive" onclick="nav('archive')"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 7.5h17v3.5h-17z"/><path d="M5 11v8h14v-8"/><path d="M10 14h4"/></svg> Архив</div>
+    <div class="nav-item" id="nav-stats" onclick="nav('stats')"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16"/><path d="M7 20v-6M12 20V8M17 20v-9"/></svg> Статистика</div>
+    <div class="nav-section" id="nav-section-plan">Планирование</div>
+    <div class="nav-item disabled" id="nav-plan" onclick="wip()" title="Раздел в доработке"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M8 2v4M16 2v4M3 9h18"/><path d="M8 14h3M8 17h6"/></svg> Личный план <span class="nav-badge">скоро</span></div>
+    <div class="nav-section" id="nav-section-depository">Депозитарий</div>
+    <div class="nav-item" id="nav-deposits" onclick="nav('deposits')"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 3 7v10l9 5 9-5V7z"/><path d="M3 7l9 5 9-5M12 12v10"/></svg> Картотека РИД</div>
+    <div class="nav-section" id="nav-section-refs">Справочники</div>
+    <div class="nav-item" id="nav-orders" onclick="nav('orders')"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6h11M9 12h11M9 18h11"/><path d="M5 6h.01M5 12h.01M5 18h.01"/></svg> Реестр приказов</div>
+    <div class="nav-section">Аккаунт</div>
+    <div class="nav-item" id="nav-profile" onclick="nav('profile')"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 12.5a4 4 0 1 0 0-8 4 4 0 0 0 0 8z"/><path d="M5 20a7 7 0 0 1 14 0"/></svg> Профиль</div>
+
+    <!-- current user chip (bottom) -->
+    <div class="sidebar-user" id="sidebar-user" onclick="nav('profile')">
+      <span class="sidebar-user-avatar" id="sidebar-user-icon">—</span>
       <div class="sidebar-user-info">
         <div class="sidebar-user-name" id="sidebar-user-name">—</div>
         <div class="sidebar-user-role" id="sidebar-user-role">Сотрудник</div>
       </div>
-      <button class="sidebar-logout" onclick="logout()" title="Выйти">⎋</button>
+      <button class="sidebar-logout" onclick="event.stopPropagation();logout()" title="Выйти"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5M21 12H9"/></svg></button>
     </div>
-
-    <div class="nav-section" id="nav-section-reports">Отчётность</div>
-    <div class="nav-item active" id="nav-submit" onclick="nav('submit')"><span class="nav-icon">📝</span> Подать отчёт</div>
-    <div class="nav-item" id="nav-archive" onclick="nav('archive')"><span class="nav-icon">📁</span> Архив</div>
-    <div class="nav-item" id="nav-stats" onclick="nav('stats')"><span class="nav-icon">📊</span> Статистика</div>
-    <div class="nav-section" id="nav-section-refs">Справочники</div>
-    <div class="nav-item" id="nav-orders" onclick="nav('orders')"><span class="nav-icon">📋</span> Реестр приказов</div>
-    <div class="nav-section" id="nav-section-supervisor" style="display:none">Управление</div>
-    <div class="nav-item" id="nav-employees" style="display:none" onclick="nav('employees')"><span class="nav-icon">👥</span> Сотрудники</div>
-    <div class="nav-section">Аккаунт</div>
-    <div class="nav-item" onclick="nav('profile')"><span class="nav-icon">👤</span> Профиль</div>
-    <div style="margin-top:auto;padding:12px 18px;font-size:10px;color:#bbb;user-select:none">v0.6.0</div>
   </div>
 
   <div class="main">
@@ -55,146 +69,108 @@
     <!-- ═══════════════ SUBMIT SCREEN ═══════════════ -->
     <div id="screen-submit" class="screen active">
       <div class="topbar">
-        <span class="topbar-title">Подать отчёт</span>
-        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-          <select id="report-month" style="padding:6px 10px;border:1px solid #ddd;border-radius:6px;font-size:13px"></select>
-          <select id="report-year" style="padding:6px 10px;border:1px solid #ddd;border-radius:6px;font-size:13px"></select>
-          <div class="score-display">
-            <span class="score-num" id="score-num">0</span>
-            <span class="score-cap">/ 30 б.</span>
-          </div>
-          <button class="btn btn-primary" onclick="submitReport()">⬇ Сформировать</button>
+        <div>
+          <div class="topbar-eyebrow">Достижения за период</div>
+          <div class="topbar-title">Подать отчёт</div>
+        </div>
+        <div class="period-pill">
+          <span style="display:inline-flex;color:var(--text-3)"><svg class="ic" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 9h18M8 3v4M16 3v4"/></svg></span>
+          <select id="report-month"></select>
+          <select id="report-year"></select>
         </div>
       </div>
 
-      <div class="content">
-        <div id="submit-msg" style="display:none;margin-bottom:12px"></div>
-        <div id="cap-warn" class="warn-box" style="display:none;margin-bottom:12px">
-          ⚠ Превышен лимит 30 баллов. Сумма сверх лимита не увеличивает размер премии.
+      <div class="submit-body">
+        <div class="submit-main">
+          <div id="rework-banner" style="display:none"></div>
+          <div id="emp-notif"></div>
+          <div id="submit-msg" style="display:none;margin-bottom:12px"></div>
+
+          <div class="cat-search">
+            <span class="cat-search-prefix">›</span>
+            <input id="cat-search-input" type="text" oninput="onCatSearch(this.value)"
+                   placeholder="Найти пункт — по номеру, названию или баллам…">
+            <span class="cat-search-kbd">⌘K</span>
+          </div>
+
+          <div class="cat-filter-row">
+            <span class="cat-filter-label">Фильтр:</span>
+            <div id="cat-filters" style="display:flex;gap:8px;flex-wrap:wrap"></div>
+          </div>
+
+          <div id="cat-list" class="cat-list"></div>
         </div>
 
-        <div class="card">
-          <div class="card-header">
-            <div class="card-title">➕ Добавить в отчёт</div>
-            <div style="display:flex;align-items:center;gap:10px">
-              <button class="chip chip-impl" id="chip-batch" onclick="openPanel('batch')" style="font-size:12px;padding:5px 14px;border-radius:20px">📂 Загрузить из документа</button>
-              <span style="font-size:11px;color:#aaa">или выберите категорию ниже</span>
+        <!-- right panel: "В этом отчёте" -->
+        <aside class="submit-aside">
+          <div class="submit-aside-hdr">
+            <div class="submit-aside-title">В этом отчёте</div>
+            <div class="submit-aside-period" id="aside-period">— · черновик</div>
+          </div>
+          <div class="submit-aside-items" id="added-items-list">
+            <div class="submit-aside-empty" id="aside-empty">
+              <div class="submit-aside-empty-icon">∅</div>
+              <div class="submit-aside-empty-text">Выберите категорию и заполните данные, чтобы добавить достижение в отчёт</div>
             </div>
           </div>
-          <div class="card-body" style="padding:14px 16px">
-
-            <div class="crit-group">
-              <div class="crit-group-label">Педагогическая деятельность</div>
-              <div class="crit-chips">
-                <button class="chip chip-wip" onclick="wip(this)">п.1 · Аудиторные занятия · 1 б.</button>
-                <button class="chip chip-wip" onclick="wip(this)">п.2.1 · Занятие «хорошо» · 2 б.</button>
-                <button class="chip chip-wip" onclick="wip(this)">п.2.2 · Занятие «отлично» · 3 б.</button>
-                <button class="chip chip-wip" onclick="wip(this)">п.3.1 · Лучший препод. цикла (ном.)</button>
-                <button class="chip chip-wip" onclick="wip(this)">п.3.2 · Лучший препод. цикла (победа)</button>
-                <button class="chip chip-wip" onclick="wip(this)">п.3.3 · Лучший препод. ВАС</button>
-                <button class="chip chip-wip" onclick="wip(this)">п.4 · Олимпиады / конкурсы</button>
-                <button class="chip chip-wip" onclick="wip(this)">п.5 · Мастер спорта</button>
-                <button class="chip chip-wip" onclick="wip(this)">п.6 · Учебные программы</button>
-                <button class="chip chip-wip" onclick="wip(this)">п.7 · Тематические планы</button>
-                <button class="chip chip-wip" onclick="wip(this)">п.8 · Педагогический эксперимент</button>
-                <button class="chip chip-wip" onclick="wip(this)">п.9 · Доклады (педагогические)</button>
-              </div>
+          <div class="submit-aside-footer">
+            <div class="aside-cap-warn" id="cap-warn">
+              <span style="display:inline-flex;flex-shrink:0"><svg class="ic" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l9 16H3z"/><path d="M12 9v5M12 17h.01"/></svg></span>
+              <span>Превышен месячный лимит 30 баллов. К начислению будет принято не более 30.</span>
             </div>
-
-            <div class="crit-group">
-              <div class="crit-group-label">Научная деятельность</div>
-              <div class="crit-chips">
-                <button class="chip chip-wip" onclick="wip(this)">п.10 · Защита диссертации</button>
-                <button class="chip chip-wip" onclick="wip(this)">п.11 · Консультирование докторантов</button>
-                <button class="chip chip-wip" onclick="wip(this)">п.12 · Руководство адъюнктами</button>
-                <button class="chip chip-wip" onclick="wip(this)">п.13 · Военная научная школа</button>
-                <button class="chip chip-wip" onclick="wip(this)">п.14 · Диссертационные советы</button>
-                <button class="chip chip-wip" onclick="wip(this)">п.15 · Испытания ВВСТ</button>
-                <button class="chip chip-wip" onclick="wip(this)">п.16 · Научная рота</button>
-                <button class="chip chip-wip" onclick="wip(this)">п.17 · Кадетский корпус</button>
-                <button class="chip chip-wip" onclick="wip(this)">п.18 · Монография</button>
-                <button class="chip chip-wip" onclick="wip(this)">п.19 · НИР</button>
-              </div>
+            <div class="aside-confirm-warn" id="order-confirm-warn" style="display:none">
+              <span style="display:inline-flex;flex-shrink:0"><svg class="ic" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8v5M12 16h.01"/><circle cx="12" cy="12" r="9"/></svg></span>
+              <span id="order-confirm-warn-text"></span>
             </div>
-
-            <div class="crit-group">
-              <div class="crit-group-label">ОИД / Публикации</div>
-              <div class="crit-chips">
-                <button class="chip chip-impl" id="chip-software" onclick="openPanel('software')">п.20 · ПО (ФИПС) · 5 б.</button>
-                <button class="chip chip-wip" onclick="wip(this)">п.21 · Выставка</button>
-                <button class="chip chip-wip" onclick="wip(this)">п.22 · Рук. конференцией</button>
-                <button class="chip chip-wip" onclick="wip(this)">п.23 · Рук. секцией</button>
-                <button class="chip chip-impl" id="chip-conference" onclick="openPanel('conference')">п.24 · Доклад на конференции · 5 б.</button>
-                <button class="chip chip-wip" onclick="wip(this)">п.25 · Отзывы на диссертации</button>
-                <button class="chip chip-wip" onclick="wip(this)">п.26 · Рецензии</button>
-                <button class="chip chip-impl" id="chip-article_vak_rinc" onclick="openPanel('article_vak_rinc')">п.27.1 · Статья ВАК+РИНЦ · 8 б.</button>
-                <button class="chip chip-impl" id="chip-article_rinc" onclick="openPanel('article_rinc')">п.27.2 · Статья РИНЦ · 5 б.</button>
-                <button class="chip chip-impl" id="chip-article_closed" onclick="openPanel('article_closed')">п.27.3 · Статья закрытое · 5 б.</button>
-              </div>
+            <div class="aside-total-row">
+              <span class="aside-total-label">Итого</span>
+              <span class="aside-total-pts" id="added-total-pts">0 <span style="color:var(--text-5);font-weight:400">/ 30</span></span>
             </div>
-
-            <div class="crit-group" style="margin-bottom:0">
-              <div class="crit-group-label">Прочее</div>
-              <div class="crit-chips">
-                <button class="chip chip-wip" onclick="wip(this)">п.28 · Классный руководитель</button>
-                <button class="chip chip-wip" onclick="wip(this)">п.29 · Профориентация</button>
-                <button class="chip chip-impl" id="chip-order_higher" onclick="openPanel('order_higher')">п.30.1 · Задание вышестоящего · 7 б.</button>
-                <button class="chip chip-impl" id="chip-order_academy" onclick="openPanel('order_academy')">п.30.2 · Задание ВАС · 4 б.</button>
-                <button class="chip chip-wip" onclick="wip(this)">п.31 · Руководство кафедрой</button>
-              </div>
+            <div class="aside-progress-wrap">
+              <div class="aside-progress-bar" id="aside-progress"></div>
             </div>
-
-            <div id="active-panel" style="display:none;margin-top:14px">
-              <div class="panel-box">
-                <div id="panel-content"></div>
-              </div>
-            </div>
-
+            <button class="btn btn-primary" style="width:100%;justify-content:center;padding:12px" onclick="submitReport()"><svg class="ic" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v12M7 11l5 5 5-5"/><path d="M4 18v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg> Сформировать отчёт · .xlsx</button>
           </div>
-        </div>
-
-        <div class="card" id="added-card" style="display:none">
-          <div class="card-header"><div class="card-title">📋 В этом отчёте</div></div>
-          <div class="card-body" style="padding:0 16px">
-            <div id="added-items-list"></div>
-            <div class="total-row" id="added-total">
-              <span class="total-label">Итого баллов</span>
-              <span class="total-pts" id="added-total-pts">0</span>
-            </div>
-          </div>
-        </div>
-
+        </aside>
       </div>
     </div>
 
     <!-- ═══════════════ ORDERS REGISTRY ═══════════════ -->
     <div id="screen-orders" class="screen">
       <div class="topbar">
-        <span class="topbar-title">Реестр приказов</span>
-        <button class="btn btn-primary" onclick="toggleOrdAddArea()">+ Добавить приказ</button>
+        <div>
+          <div class="topbar-eyebrow">Задания командования</div>
+          <div class="topbar-title">Реестр приказов</div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <button class="btn btn-danger btn-sm" onclick="clearOrders()"><svg class="ic" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg> Очистить реестр приказов</button>
+          <button class="btn btn-primary" onclick="showOrderModal()">+ Добавить приказ</button>
+        </div>
       </div>
       <div class="content">
-        <div id="ord-add-area" style="display:none;margin-bottom:12px">
-          <div class="mode-toggle" style="margin-bottom:10px">
-            <button class="mode-btn active" id="ord-btn-upload" onclick="ordParseMode('upload')">⬆ Загрузить .docx</button>
-            <button class="mode-btn" id="ord-btn-manual" onclick="ordParseMode('manual')">✏ Ввести вручную</button>
+        <div style="max-width:960px">
+          <div class="ord-dropzone" onclick="document.getElementById('ord-file-input').click()">
+            <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="var(--gold)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg>
+            <div class="ord-dropzone-title">Загрузить оперативное задание (.docx)</div>
+            <div class="ord-dropzone-sub">Автоматический разбор — или <span onclick="event.stopPropagation();showOrderModal()" style="color:var(--gold-dim);text-decoration:underline;cursor:pointer">добавьте вручную</span></div>
           </div>
-          <div id="ord-upload-zone">
-            <div class="upload-zone" onclick="document.getElementById('ord-file-input').click()">
-              <div style="font-size:28px;margin-bottom:6px">📄</div>
-              Загрузить оперативное задание .docx — данные заполнятся автоматически<br>
-              <span style="font-size:11px;color:#aaa">После загрузки проверьте поля и сохраните</span>
+          <input type="file" id="ord-file-input" accept=".docx" style="display:none" onchange="parseOrderFile(this)">
+          <div id="ord-parse-result" style="display:none;margin-top:12px"></div>
+
+          <div class="ord-list-head">
+            <div class="ord-list-title">Все приказы</div>
+            <div class="ord-list-count" id="orders-count">0 записей</div>
+          </div>
+          <div class="ord-table">
+            <div class="ord-thead">
+              <div style="width:120px">Номер</div>
+              <div style="flex:1">Наименование</div>
+              <div style="width:120px">Уровень</div>
+              <div style="width:96px;text-align:right">Срок</div>
+              <div style="width:120px;text-align:right">Статус</div>
+              <div style="width:70px"></div>
             </div>
-            <input type="file" id="ord-file-input" accept=".docx" style="display:none" onchange="parseOrderFile(this)">
-            <div id="ord-parse-result" style="display:none"></div>
-          </div>
-        </div>
-        <div class="card">
-          <div class="card-body" style="padding:0">
-            <table class="data-table">
-              <thead><tr><th>Номер</th><th>Название</th><th>Исполнитель</th><th>Уровень</th><th>Срок</th><th>Статус</th><th></th></tr></thead>
-              <tbody id="orders-table-body"><tr><td colspan="7" class="empty-state">Загрузка...</td></tr></tbody>
-            </table>
+            <div id="orders-table-body"><div class="empty-state">Загрузка...</div></div>
           </div>
         </div>
       </div>
@@ -203,8 +179,11 @@
     <!-- ═══════════════ ARCHIVE ═══════════════ -->
     <div id="screen-archive" class="screen">
       <div class="topbar">
-        <span class="topbar-title">Архив отчётов</span>
-        <button class="btn btn-danger btn-sm" onclick="clearArchive()" style="margin-left:auto">🗑 Очистить архив</button>
+        <div>
+          <div class="topbar-eyebrow">История отчётов</div>
+          <div class="topbar-title">Архив</div>
+        </div>
+        <button class="btn btn-danger btn-sm" onclick="clearArchive()"><svg class="ic" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg> Очистить историю отчётов</button>
       </div>
       <div class="content">
         <div class="month-chips" id="archive-chips"></div>
@@ -214,25 +193,78 @@
 
     <!-- ═══════════════ STATS ═══════════════ -->
     <div id="screen-stats" class="screen">
-      <div class="topbar"><span class="topbar-title">Статистика</span></div>
+      <div class="topbar">
+        <div>
+          <div class="topbar-eyebrow">Динамика баллов</div>
+          <div class="topbar-title">Статистика</div>
+        </div>
+      </div>
       <div class="content">
-        <div class="metric-grid" id="stats-cards"></div>
-        <div class="card">
-          <div class="card-header"><div class="card-title">История отчётов</div></div>
-          <div class="card-body" style="padding:0">
-            <table class="data-table">
-              <thead><tr><th>Период</th><th>Приказов</th><th>ПО</th><th>Статей</th><th>Итого баллов</th><th></th></tr></thead>
-              <tbody id="stats-table"></tbody>
-            </table>
+        <div id="stats-body" style="max-width:980px"></div>
+      </div>
+    </div>
+
+    <!-- ═══════════════ ЛИЧНЫЙ ПЛАН РАБОТЫ ═══════════════ -->
+    <div id="screen-plan" class="screen">
+      <div class="topbar">
+        <div>
+          <div class="topbar-eyebrow">Планирование · часы</div>
+          <div class="topbar-title">Личный план работы</div>
+        </div>
+        <div class="period-pill" id="plan-year-pill"></div>
+      </div>
+      <div class="content">
+        <div id="plan-body" style="max-width:1160px"></div>
+      </div>
+    </div>
+
+    <!-- ═══════════════ КАРТОТЕКА РИД (депозитарий) ═══════════════ -->
+    <div id="screen-deposits" class="screen">
+      <div class="topbar">
+        <div>
+          <div class="topbar-eyebrow">Депозитарий · РИД</div>
+          <div class="topbar-title">Картотека РИД</div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <button class="btn btn-danger btn-sm" id="dep-clear-po-btn" onclick="clearSoftware()"><svg class="ic" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg> Очистить базу ПО</button>
+          <button class="btn btn-primary" id="dep-register-btn" onclick="openRegisterModal()">+ Зарегистрировать</button>
+        </div>
+      </div>
+      <div class="content">
+        <div class="dep-toolbar" id="dep-emp-toolbar">
+          <div class="dep-tabs">
+            <button class="dep-tab active" id="dep-tab-available" onclick="setBankTab('available')">В картотеке <span class="dep-tab-count" id="dep-count-available">0</span></button>
+            <button class="dep-tab" id="dep-tab-submitted" onclick="setBankTab('submitted')">Поданы <span class="dep-tab-count" id="dep-count-submitted">0</span></button>
+          </div>
+          <div class="dep-toolbar-right">
+            <div class="dep-filters" id="dep-filters"></div>
+            <div class="dep-view-toggle">
+              <button class="dep-view-btn active" id="dep-view-tiles" onclick="setBankView('tiles')" title="Плитки"><svg class="ic" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></button>
+              <button class="dep-view-btn" id="dep-view-list" onclick="setBankView('list')" title="Список"><svg class="ic" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg></button>
+            </div>
           </div>
         </div>
+        <div id="dep-body"></div>
       </div>
     </div>
 
     <!-- ═══════════════ PROFILE ═══════════════ -->
     <div id="screen-profile" class="screen">
-      <div class="topbar"><span class="topbar-title">Профиль сотрудника</span></div>
-      <div class="content" style="max-width:500px">
+      <div class="topbar">
+        <div>
+          <div class="topbar-eyebrow">Учётная запись</div>
+          <div class="topbar-title">Профиль</div>
+        </div>
+      </div>
+      <div class="content" style="max-width:560px">
+        <div class="profile-hero">
+          <div class="profile-avatar" id="profile-avatar">—</div>
+          <div style="flex:1;min-width:0">
+            <div class="profile-hero-name" id="profile-hero-name">—</div>
+            <div class="profile-hero-sub" id="profile-hero-sub">—</div>
+          </div>
+          <button class="btn btn-secondary" onclick="logout()">⤿ Сменить учётную запись</button>
+        </div>
         <div class="card">
           <div class="card-header"><div class="card-title">Данные</div></div>
           <div class="card-body">
@@ -243,31 +275,54 @@
               <div class="field full"><label>Подразделение</label><input type="text" id="p-unit"></div>
               <div class="field full"><label>Воинское звание / ранг</label><input type="text" id="p-rank" placeholder="доцент, к.т.н. и т.д."></div>
             </div>
-            <div style="margin-top:14px;display:flex;justify-content:flex-end">
-              <button class="btn btn-primary" onclick="saveProfile()">✓ Сохранить</button>
+            <div style="margin-top:16px;display:flex;justify-content:flex-end">
+              <button class="btn btn-primary" onclick="saveProfile()"><svg class="ic" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5L20 6"/></svg> Сохранить</button>
             </div>
-            <div id="profile-msg" style="margin-top:8px"></div>
+            <div id="profile-msg" style="margin-top:10px"></div>
           </div>
         </div>
       </div>
     </div>
 
-    <!-- ═══════════════ EMPLOYEES (supervisor only) ═══════════════ -->
-    <div id="screen-employees" class="screen">
+    <!-- ═══════════════ ДАШБОРД (начальник) ═══════════════ -->
+    <div id="screen-dashboard" class="screen">
       <div class="topbar">
-        <span class="topbar-title">Сотрудники</span>
-        <button class="btn btn-primary" onclick="showUserModal()">+ Добавить</button>
+        <div>
+          <div class="topbar-eyebrow">Контроль подразделения</div>
+          <div class="topbar-title">Дашборд</div>
+        </div>
       </div>
       <div class="content">
-        <div class="card">
-          <div class="card-body" style="padding:0">
-            <table class="data-table">
-              <thead><tr><th>Сотрудник</th><th>Должность</th><th>Отчётов</th><th>Последний статус</th><th></th></tr></thead>
-              <tbody id="employees-table-body"><tr><td colspan="5" class="empty-state">Загрузка...</td></tr></tbody>
-            </table>
-          </div>
+        <div id="dash-notif" style="max-width:1040px"></div>
+        <div id="dash-body" style="max-width:1040px"></div>
+      </div>
+    </div>
+
+    <!-- ═══════════════ СОТРУДНИКИ (начальник) ═══════════════ -->
+    <div id="screen-employees" class="screen">
+      <div class="topbar">
+        <div>
+          <div class="topbar-eyebrow">Контроль и проверка</div>
+          <div class="topbar-title">Сотрудники</div>
         </div>
+        <button class="btn btn-primary" onclick="showUserModal()">+ Добавить аккаунт</button>
+      </div>
+      <div class="content">
+        <div id="employees-list" style="max-width:1040px"></div>
         <div id="employee-archive-area"></div>
+      </div>
+    </div>
+
+    <!-- ═══════════════ ПРОВЕРКА ОТЧЁТА (начальник) ═══════════════ -->
+    <div id="screen-review" class="screen">
+      <div class="topbar">
+        <div>
+          <div class="topbar-eyebrow">Проверка</div>
+          <div class="topbar-title">Отчёт сотрудника</div>
+        </div>
+      </div>
+      <div class="content">
+        <div id="review-body" style="max-width:920px"></div>
       </div>
     </div>
 
@@ -340,7 +395,7 @@
     <input type="hidden" id="reject-report-id">
     <div class="field full" style="margin-bottom:4px">
       <label>Комментарий для сотрудника (необязательно)</label>
-      <textarea id="reject-comment" style="height:80px;width:100%;padding:7px 10px;border:1px solid #ddd;border-radius:6px;font-size:13px;resize:vertical" placeholder="Причина отклонения…"></textarea>
+      <textarea id="reject-comment" placeholder="Причина отклонения…"></textarea>
     </div>
     <div class="modal-footer">
       <button class="btn btn-secondary" onclick="closeRejectModal()">Отмена</button>
@@ -349,31 +404,51 @@
   </div>
 </div>
 
-<!-- ═══ WIP TOAST ═══ -->
-<div id="wip-toast" style="position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#1a1a1a;color:#fff;padding:9px 20px;border-radius:99px;font-size:13px;display:none;z-index:200;pointer-events:none">
-  🔧 Этот раздел в разработке
+<!-- ═══ REGISTER RID MODAL (картотека) ═══ -->
+<div id="register-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeRegisterModal()">
+  <div class="modal">
+    <div class="modal-title">Зарегистрировать в картотеке</div>
+    <div class="mode-toggle" style="margin-bottom:14px">
+      <button class="mode-btn active" id="reg-type-po" onclick="setRegType('po')"><svg class="ic" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="4" width="19" height="14" rx="2"/><path d="M2.5 8h19"/><path d="M8 12l2 2-2 2M13.5 16H16"/></svg> Программа ЭВМ</button>
+      <button class="mode-btn" id="reg-type-article" onclick="setRegType('article')"><svg class="ic" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M9 13h6M9 16.5h4"/></svg> Статья</button>
+    </div>
+    <div id="reg-form"></div>
+    <div id="register-modal-msg" style="margin-top:8px"></div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeRegisterModal()">Отмена</button>
+      <button class="btn btn-primary" onclick="saveRegister()">Зарегистрировать</button>
+    </div>
+  </div>
 </div>
 
+<!-- ═══ WIP / TOAST ═══ -->
+<div id="wip-toast" style="display:none"></div>
+
+<script src="/static/js/icons.js"></script>
 <script src="/static/js/core.js"></script>
 <script src="/static/js/panels.js"></script>
-<script src="/static/js/batch.js"></script>
+<script src="/static/js/categories.js"></script>
+<script src="/static/js/deposits.js"></script>
 <script src="/static/js/reports.js"></script>
+<script src="/static/js/plan.js"></script>
 <script src="/static/js/supervisor.js"></script>
+<script src="/static/js/chief.js"></script>
+<script src="/static/js/notifications.js"></script>
 
 <!-- DOCX PREVIEW MODAL -->
-<div id="docx-modal" style="display:none;position:fixed;inset:0;z-index:1000;background:rgba(0,0,0,.6);align-items:center;justify-content:center" onclick="if(event.target===this)closeDocxModal()">
-  <div style="background:#fff;border-radius:12px;width:min(900px,96vw);height:90vh;display:flex;flex-direction:column;box-shadow:0 24px 80px rgba(0,0,0,.4)">
-    <div style="display:flex;align-items:center;gap:12px;padding:14px 18px;border-bottom:1px solid #e5e7eb;flex-shrink:0">
-      <span id="docx-modal-title" style="font-weight:600;font-size:14px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
-      <a id="docx-modal-dl" class="btn btn-secondary btn-sm" download>⬇ Скачать</a>
-      <button class="btn btn-secondary btn-sm" onclick="closeDocxModal()" style="padding:4px 10px">✕</button>
+<div id="docx-modal" style="display:none;position:fixed;inset:0;z-index:1000;background:rgba(0,0,0,.7);align-items:center;justify-content:center" onclick="if(event.target===this)closeDocxModal()">
+  <div style="background:var(--surface);border:1px solid var(--border2);border-radius:14px;width:min(900px,96vw);height:90vh;display:flex;flex-direction:column;box-shadow:0 24px 80px rgba(0,0,0,.5)">
+    <div style="display:flex;align-items:center;gap:12px;padding:14px 18px;border-bottom:1px solid var(--border);flex-shrink:0">
+      <span id="docx-modal-title" style="font-weight:600;font-size:14px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-1)"></span>
+      <a id="docx-modal-dl" class="btn btn-secondary btn-sm" download><svg class="ic" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v12M7 11l5 5 5-5"/><path d="M4 18v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg> Скачать</a>
+      <button class="btn btn-secondary btn-sm" onclick="closeDocxModal()" style="padding:4px 10px"><svg class="ic" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
     </div>
-    <div style="flex:1;position:relative;overflow:hidden;border-radius:0 0 12px 12px">
+    <div style="flex:1;position:relative;overflow:hidden;border-radius:0 0 14px 14px;background:#fff">
       <div id="docx-modal-loader" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:12px;color:#6b7280;font-size:14px">
-        <div style="width:36px;height:36px;border:3px solid #e5e7eb;border-top-color:#6366f1;border-radius:50%;animation:spin .8s linear infinite"></div>
+        <div style="width:36px;height:36px;border:3px solid #e5e7eb;border-top-color:var(--gold);border-radius:50%;animation:spin .8s linear infinite"></div>
         Загрузка документа…
       </div>
-      <iframe id="docx-modal-iframe" style="display:none;width:100%;height:100%;border:none;border-radius:0 0 12px 12px"></iframe>
+      <iframe id="docx-modal-iframe" style="display:none;width:100%;height:100%;border:none;border-radius:0 0 14px 14px"></iframe>
     </div>
   </div>
 </div>

@@ -10,7 +10,7 @@ function buildOrdersPanel(level) {
   const levelLabel = level === 'higher' ? 'Задания вышестоящего (п.30.1)' : 'Задания ВАС (п.30.2)';
   const filtered = state.activeOrders.filter(o => o.level === level);
   if (!filtered.length) {
-    return `<div class="panel-title">${levelLabel} <button class="btn btn-secondary btn-sm" onclick="closePanel()">✕</button></div>
+    return `<div class="panel-title">${levelLabel} <button class="btn btn-secondary btn-sm" onclick="closePanel()">${ic('close')}</button></div>
       <div class="empty-state" style="padding:20px">Нет активных приказов этого уровня. <button class="btn btn-secondary btn-sm" onclick="nav('orders')">Добавить в реестр</button></div>`;
   }
   const rows = filtered.map(o => {
@@ -24,7 +24,7 @@ function buildOrdersPanel(level) {
       : `<span class="badge badge-dated">до ${o.deadline_date}</span>`;
     const cfn = state.confirmations[o.id];
     const uploadCls = cfn ? 'upload-label has-file' : 'upload-label';
-    const uploadTxt = cfn ? '📎 ' + cfn.split('_').slice(2).join('_') : '📎 Подтверждайка';
+    const uploadName = cfn ? cfn.split('_').slice(2).join('_') : 'Подтверждайка';
     const showCZ = alreadyAdded ? '' : 'display:none';
     return `<div class="order-row">
       <input type="checkbox" class="order-check" id="oc-${o.id}" ${checked} onchange="toggleOrderItem(${o.id}, this.checked)">
@@ -34,7 +34,7 @@ function buildOrdersPanel(level) {
         <div class="order-badges">${lvlBadge}${dlBadge}</div>
         <div class="confirm-zone" style="${showCZ}" id="confirm-zone-${o.id}">
           <label class="${uploadCls}" id="confirm-label-${o.id}">
-            ${uploadTxt}
+            ${ic('paperclip')} <span class="ul-txt">${uploadName}</span>
             <input type="file" accept=".docx,.pdf" style="display:none" onchange="uploadConfirmation(${o.id}, this)">
           </label>
         </div>
@@ -42,8 +42,8 @@ function buildOrdersPanel(level) {
     </div>`;
   }).join('');
 
-  return `<div class="panel-title">${levelLabel} <button class="btn btn-secondary btn-sm" onclick="closePanel()">✕ закрыть</button></div>
-    <div style="font-size:12px;color:#888;margin-bottom:10px">Отметьте задания, по которым отчитываетесь в этом месяце</div>
+  return `<div class="panel-title">${levelLabel} <button class="btn btn-secondary btn-sm" onclick="closePanel()">${ic('close')} закрыть</button></div>
+    <div style="font-size:12px;color:var(--text-4);margin-bottom:10px">Отметьте задания, по которым отчитываетесь в этом месяце</div>
     ${rows}
     <div style="margin-top:10px"><button class="btn btn-secondary btn-sm" onclick="nav('orders')">+ Добавить новый приказ</button></div>`;
 }
@@ -55,7 +55,7 @@ function toggleOrderItem(id, checked) {
   if (checked) {
     if (cz) cz.style.display = '';
     const pts = order.level === 'academy' ? WEIGHTS.order_academy : WEIGHTS.order_higher;
-    addItem('order', '📋', `№${order.number} — ${order.title}`, order.level === 'academy' ? 'Задание ВАС · п.30.2' : 'Задание вышестоящего · п.30.1', pts, order);
+    addItem('order', ic('order'), `№${order.number} — ${order.title}`, order.level === 'academy' ? 'Задание ВАС · п.30.2' : 'Задание вышестоящего · п.30.1', pts, order);
   } else {
     if (cz) { cz.style.display = 'none'; }
     delete state.confirmations[id];
@@ -74,20 +74,22 @@ async function uploadConfirmation(orderId, input) {
     const d = await r.json();
     state.confirmations[orderId] = d.filename;
     const lbl = document.getElementById('confirm-label-' + orderId);
-    if (lbl) { lbl.className = 'upload-label has-file'; lbl.childNodes[0].textContent = '📎 ' + input.files[0].name; }
+    if (lbl) { lbl.className = 'upload-label has-file'; const t = lbl.querySelector('.ul-txt'); if (t) t.textContent = input.files[0].name; }
   } catch(e) { alert('Ошибка загрузки: ' + e.message); }
 }
 
 // ─── SOFTWARE PANEL ────────────────────────────────────────────────────────
-function buildSoftwarePanel() {
-  return `<div class="panel-title">ПО / Свидетельство ФИПС <button class="btn btn-secondary btn-sm" onclick="closePanel()">✕ закрыть</button></div>
+// embed=true → форма для модалки «Зарегистрировать» (без заголовка с закрытием
+// и без кнопки «+ В отчёт» — у модалки своя кнопка сохранения).
+function buildSoftwarePanel(embed) {
+  return `${embed ? '' : `<div class="panel-title">ПО / Свидетельство ФИПС <button class="btn btn-secondary btn-sm" onclick="closePanel()">${ic('close')} закрыть</button></div>`}
     <div class="mode-toggle">
-      <button class="mode-btn" id="sw-btn-upload" onclick="swMode('upload')">⬆ Загрузить .docx</button>
-      <button class="mode-btn active" id="sw-btn-manual" onclick="swMode('manual')">✏ Ввести вручную</button>
+      <button class="mode-btn" id="sw-btn-upload" onclick="swMode('upload')">${ic('upload')} Загрузить .docx</button>
+      <button class="mode-btn active" id="sw-btn-manual" onclick="swMode('manual')">${ic('edit')} Ввести вручную</button>
     </div>
     <div id="sw-upload-zone" style="display:none">
       <div class="upload-zone" onclick="document.getElementById('sw-file-input').click()">
-        <div style="font-size:24px;margin-bottom:5px">📄</div>
+        <div style="margin-bottom:5px;color:var(--gold)">${ic('file',26)}</div>
         Выберите «Докладная записка ПО.docx»
       </div>
       <input type="file" id="sw-file-input" accept=".docx" style="display:none" onchange="parseSoftwareFile(this)">
@@ -112,22 +114,24 @@ function buildSoftwarePanel() {
         </tr></thead>
         <tbody id="sw-authors-body"></tbody>
       </table>
-      <button class="add-btn" onclick="addAuthorRow()">+ Автора</button>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-top:8px;gap:10px">
+        <button class="add-btn" onclick="addAuthorRow()">+ Автора</button>
+        <span class="sw-contrib-sum" id="sw-contrib-sum"></span>
+      </div>
       <div class="pts-block" id="sw-pts-block" style="display:none;margin-top:12px">
         <div style="font-size:12px;font-weight:600;margin-bottom:10px;display:flex;justify-content:space-between">
-          <span>Баллы в этом месяце</span>
-          <span style="color:#888;font-weight:400">Всего на свидетельство: <b>5</b></span>
+          <span>Баллы (рассчитаны из вклада)</span>
+          <span style="color:var(--text-4);font-weight:400">Всего на свидетельство: <b>5</b></span>
         </div>
         <div id="sw-pts-rows"></div>
         <div class="pts-total">
-          <span style="color:#555">Итого заявлено:</span>
+          <span style="color:var(--text-3)">Итого:</span>
           <span id="sw-pts-sum" class="pts-ok">0 / 5</span>
         </div>
-        <div id="sw-pts-warn" style="display:none;margin-top:6px"></div>
       </div>
-      <div style="margin-top:12px">
+      ${embed ? '' : `<div style="margin-top:12px">
         <button class="btn btn-primary btn-sm" onclick="addSoftwareToReport()">+ Добавить в отчёт</button>
-      </div>
+      </div>`}
     </div>`;
 }
 
@@ -143,72 +147,58 @@ function addAuthorRow(fio='', pos='', pct=100) {
   if (!tbody) return;
   const tr = document.createElement('tr');
   tr.innerHTML = `
-    <td><input type="text" value="${fio}" placeholder="Иванов И.И."></td>
+    <td><input type="text" value="${fio}" placeholder="Иванов И.И." oninput="recalcSwPts()"></td>
     <td><input type="text" value="${pos}" placeholder="МНС НИО-5"></td>
-    <td><input type="number" value="${pct}" min="0" max="100" onchange="syncPtsRows()" style="text-align:center"></td>
-    <td><button onclick="this.closest('tr').remove();syncPtsRows()" style="background:none;border:none;cursor:pointer;color:#aaa;font-size:14px">✕</button></td>`;
+    <td><input type="number" value="${pct}" min="0" max="100" oninput="recalcSwPts()" style="text-align:center"></td>
+    <td><button onclick="this.closest('tr').remove();recalcSwPts()" style="background:none;border:none;cursor:pointer;color:var(--text-5);font-size:14px">${ic('close')}</button></td>`;
   tbody.appendChild(tr);
-  syncPtsRows();
+  recalcSwPts();
 }
 
-function syncPtsRows() {
+function round2(n) { return Math.round(n * 100) / 100; }
+function _fmtPts(n) { return round2(n).toString(); }
+
+// Баллы ПО ЖЁСТКО связаны с вкладом: балл автора = вклад% / 100 × 5.
+// Поля баллов — только для чтения; меняешь % — меняются баллы.
+function recalcSwPts() {
   const rows = document.querySelectorAll('#sw-authors-body tr');
   const block = document.getElementById('sw-pts-block');
   const container = document.getElementById('sw-pts-rows');
-  if (!rows.length || !block) return;
-  block.style.display = rows.length ? '' : 'none';
-  const prev = {};
-  if (container) container.querySelectorAll('.pts-row-item').forEach(r => { prev[r.dataset.name] = r.querySelector('input').value; });
-  if (container) container.innerHTML = '';
-  rows.forEach(row => {
-    const name = row.cells[0].querySelector('input').value.trim() || 'Автор';
-    const val = prev[name] !== undefined ? prev[name] : '0';
-    const div = document.createElement('div');
-    div.className = 'pts-row-item';
-    div.dataset.name = name;
-    div.innerHTML = `<span class="name">${name}</span><input type="number" value="${val}" min="0" max="5" step="0.5" onchange="recalcPts()"><span style="font-size:11px;color:#888">б.</span>`;
-    container.appendChild(div);
+  const sumEl = document.getElementById('sw-contrib-sum');
+  if (!block) return { sumPct: 0, sumPts: 0 };
+  if (!rows.length) { block.style.display = 'none'; if (sumEl) sumEl.textContent = ''; return { sumPct: 0, sumPts: 0 }; }
+  block.style.display = '';
+  let sumPct = 0, sumPts = 0;
+  const items = [];
+  rows.forEach(r => {
+    const name = r.cells[0].querySelector('input').value.trim() || 'Автор';
+    const pct = parseFloat(r.cells[2].querySelector('input').value) || 0;
+    const pts = round2(pct / 100 * 5);
+    sumPct += pct; sumPts += pts;
+    items.push({ name, pts });
   });
-  recalcPts();
-}
-
-function recalcPts() {
-  const inputs = document.querySelectorAll('#sw-pts-rows input');
-  let sum = 0;
-  inputs.forEach(i => sum += parseFloat(i.value) || 0);
-  const el = document.getElementById('sw-pts-sum');
-  const warnEl = document.getElementById('sw-pts-warn');
-  if (!el) return sum;
-  el.textContent = sum + ' / 5';
-  if (sum > 5) {
-    el.className = 'pts-over';
-    warnEl.style.display = '';
-    warnEl.className = 'err-box';
-    warnEl.textContent = '⚠ Сумма превышает 5 баллов';
-  } else if (sum < 5) {
-    el.className = 'pts-warn';
-    warnEl.style.display = '';
-    warnEl.className = 'warn-box';
-    warnEl.innerHTML = '⚠ ' + (5 - sum).toFixed(1) + ' балл(а) не заявлено — они сгорят.';
-  } else {
-    el.className = 'pts-ok';
-    if (warnEl) warnEl.style.display = 'none';
+  sumPct = round2(sumPct); sumPts = round2(sumPts);
+  if (container) container.innerHTML = items.map(d =>
+    `<div class="pts-row-item"><span class="name">${d.name}</span><span class="pts-val">${_fmtPts(d.pts)} б.</span></div>`).join('');
+  if (sumEl) {
+    const ok = sumPct === 100;
+    sumEl.className = 'sw-contrib-sum ' + (ok ? 'ok' : 'bad');
+    sumEl.innerHTML = ok ? `${ic('check')} сумма долей 100%` : `сумма долей ${sumPct}% — должно быть 100%`;
   }
-  return sum;
+  const totEl = document.getElementById('sw-pts-sum');
+  if (totEl) { totEl.textContent = `${_fmtPts(sumPts)} / 5`; totEl.className = (sumPct === 100) ? 'pts-ok' : 'pts-over'; }
+  return { sumPct, sumPts };
 }
 
 function getAuthorsFromForm() {
   const rows = document.querySelectorAll('#sw-authors-body tr');
-  const ptsRows = document.querySelectorAll('#sw-pts-rows .pts-row-item');
-  const ptsMap = {};
-  ptsRows.forEach(r => { ptsMap[r.dataset.name] = parseFloat(r.querySelector('input').value) || 0; });
   return Array.from(rows).map(r => {
-    const name = r.cells[0].querySelector('input').value.trim();
+    const pct = parseInt(r.cells[2].querySelector('input').value) || 0;
     return {
-      full_name: name,
+      full_name: r.cells[0].querySelector('input').value.trim(),
       position: r.cells[1].querySelector('input').value.trim(),
-      contribution_percent: parseInt(r.cells[2].querySelector('input').value) || 0,
-      points_claimed: ptsMap[name] || 0,
+      contribution_percent: pct,
+      points_claimed: round2(pct / 100 * 5),
     };
   });
 }
@@ -218,8 +208,10 @@ function getAuthorsFromForm() {
 function myPointsFrom(authors, ptsKey) {
   const ln = (state.profile.last_name || '').toLowerCase().trim();
   if (!ln) return 0;
+  // Совпадение по слову-токену, а не по подстроке: «Иванов» не ловит «Иванова»,
+  // «Ким» не ловит «Якимов». ФИО вида «Григоренко А.Г.» → токен «григоренко».
   return (authors || [])
-    .filter(a => (a.full_name || '').toLowerCase().includes(ln))
+    .filter(a => (a.full_name || '').toLowerCase().split(/[\s.,]+/).filter(Boolean).includes(ln))
     .reduce((s, a) => s + (parseFloat(a[ptsKey]) || 0), 0);
 }
 
@@ -230,27 +222,35 @@ function noMyPointsMsg() {
     : 'Укажите свою фамилию в разделе «Профиль» — без неё система не знает, какие баллы ваши.';
 }
 
-function addSoftwareToReport() {
+// Сбор и валидация данных формы ПО. Возвращает объект данных или null (с alert).
+// Один источник истины для inline-добавления в отчёт И для регистрации в картотеку.
+function collectSoftwareData() {
   const title = document.getElementById('sw-title').value.trim();
   const cert = document.getElementById('sw-cert').value.trim();
   const date = document.getElementById('sw-date').value;
   const output = document.getElementById('sw-output').value.trim();
-  if (!title || !cert) { alert('Введите название и номер свидетельства'); return; }
-  const sum = recalcPts();
-  if (sum === 0) { alert('Укажите баллы хотя бы для одного автора'); return; }
-  if (sum > 5) { alert('Сумма баллов превышает 5'); return; }
+  if (!title || !cert) { alert('Введите название и номер свидетельства'); return null; }
+  const { sumPct } = recalcSwPts();
+  if (sumPct !== 100) { alert(`Сумма долей авторов должна быть ровно 100% (сейчас ${sumPct}%).`); return null; }
   const authors = getAuthorsFromForm();
-  const myPts = myPointsFrom(authors, 'points_claimed');
-  if (myPts <= 0) { alert(noMyPointsMsg()); return; }
-  const data = { title, certificate_number: cert, registration_date: date, output_data: output, authors, points_claimed: myPts };
+  const myPts = round2(myPointsFrom(authors, 'points_claimed'));
+  if (myPts <= 0) { alert(noMyPointsMsg()); return null; }
+  return { title, certificate_number: cert, registration_date: date, output_data: output, authors, points_claimed: myPts };
+}
+
+function addSoftwareToReport() {
+  const data = collectSoftwareData();
+  if (!data) return;
+  const title = data.title, cert = data.certificate_number, myPts = data.points_claimed;
 
   if (state.editingItemKey) {
     const item = state.addedItems.find(i => i.key === state.editingItemKey);
     if (item) {
       item.label = title;
-      item.sub = `№${cert} · п.20`;
+      item.sub = `№${cert} · ПО (п.20)`;
       item.pts = myPts;
       item.data = { ...item.data, ...data };
+      item._dirty = true;   // правки нужно пересохранить в БД при подаче
     }
     state.editingItemKey = null;
     updateScore();
@@ -261,7 +261,7 @@ function addSoftwareToReport() {
   if (state.addedItems.find(i => i.type === 'software' && i.data.certificate_number === cert)) {
     alert('Это свидетельство уже добавлено в отчёт'); return;
   }
-  addItem('software', '💾', title, `№${cert} · п.20`, myPts, data);
+  addItem('software', ic('software'), title, `№${cert} · ПО (п.20)`, myPts, data);
 
   // Reset form
   document.getElementById('sw-title').value = '';
@@ -272,6 +272,12 @@ function addSoftwareToReport() {
   if (document.getElementById('sw-pts-rows')) document.getElementById('sw-pts-rows').innerHTML = '';
   if (document.getElementById('sw-pts-block')) document.getElementById('sw-pts-block').style.display = 'none';
   addAuthorRow();
+}
+
+function _swParseBadge(d) {
+  if (d.already_used) return `<span class="sw-parse-badge used">${ic('warning')} уже подано — в архиве «Поданы»</span>`;
+  if (d.in_bank) return `<span class="sw-parse-badge bank">уже в картотеке</span>`;
+  return '';
 }
 
 async function parseSoftwareFile(input) {
@@ -290,24 +296,25 @@ async function parseSoftwareFile(input) {
     if (list.length === 1) {
       // Single entry — fill form as before
       const d = list[0];
-      pr.innerHTML = `<div class="prt">✓ Распознано из файла</div>
+      pr.innerHTML = `<div class="prt">${ic('check')} Распознано из файла</div>
+        ${_swParseBadge(d)}
         <div class="parse-field"><span class="parse-key">Название:</span><span>${d.title}</span></div>
         <div class="parse-field"><span class="parse-key">№ свидетельства:</span><span>${d.certificate_number}</span></div>
         <div class="parse-field"><span class="parse-key">Дата:</span><span>${d.registration_date}</span></div>`;
       _fillSwForm(d);
       swMode('manual');
     } else {
-      // Multiple entries — show list, each with "Заполнить форму" button
-      pr.innerHTML = `<div class="prt">✓ Распознано ${list.length} программы из файла</div>` +
+      // Multiple entries — show list, each with status + select button
+      pr.innerHTML = `<div class="prt">${ic('check')} Распознано ${list.length} ${_plural(list.length, 'программа', 'программы', 'программ')} из файла</div>` +
         list.map((d, i) => `
-          <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid #d1fae5">
-            <div>
-              <div style="font-size:12px;font-weight:600">${d.title}</div>
-              <div style="font-size:11px;color:#6b7280">${d.certificate_number} · ${d.registration_date}</div>
+          <div class="sw-parse-row${d.already_used ? ' used' : ''}">
+            <div class="sw-parse-info">
+              <div class="sw-parse-title">${d.title}</div>
+              <div class="sw-parse-meta">${d.certificate_number} · ${d.registration_date}</div>
+              ${_swParseBadge(d)}
             </div>
-            <button class="btn btn-secondary btn-sm" onclick="swSelectEntry(${i})" data-idx="${i}">Выбрать →</button>
+            <button class="btn btn-secondary btn-sm" onclick="swSelectEntry(${i})" data-idx="${i}">Выбрать ${ic('arrowRight')}</button>
           </div>`).join('');
-      // Store list for selection
       pr._swList = list;
     }
   } catch(e) { alert('Ошибка парсинга: ' + e.message); }
@@ -319,11 +326,12 @@ function swSelectEntry(idx) {
   if (!d) return;
   _fillSwForm(d);
   swMode('manual');
-  pr.innerHTML = `<div class="prt">✓ Выбрана программа ${idx + 1}</div>
+  pr.innerHTML = `<div class="prt">${ic('check')} Выбрана программа ${idx + 1}</div>
+    ${_swParseBadge(d)}
     <div class="parse-field"><span class="parse-key">Название:</span><span>${d.title}</span></div>
     <div class="parse-field"><span class="parse-key">№ свидетельства:</span><span>${d.certificate_number}</span></div>
     <div class="parse-field"><span class="parse-key">Дата:</span><span>${d.registration_date}</span></div>
-    <button class="btn btn-secondary btn-sm" style="margin-top:6px" onclick="document.getElementById('sw-file-input').click()">← Другой файл</button>`;
+    <button class="btn btn-secondary btn-sm" style="margin-top:6px" onclick="document.getElementById('sw-file-input').click()">${ic('back')} Другой файл</button>`;
 }
 
 function _fillSwForm(d) {
@@ -334,20 +342,7 @@ function _fillSwForm(d) {
   if (d.docx_filename) document.getElementById('sw-file-input')._docxFilename = d.docx_filename;
   const tbody = document.getElementById('sw-authors-body');
   if (tbody) { tbody.innerHTML = ''; (d.authors || []).forEach(a => addAuthorRow(a.full_name, a.position, a.contribution_percent)); }
-  // Auto-apply pts from contribution_percent
-  const authors = d.authors || [];
-  const totalPct = sumPct(authors);
-  if (totalPct > 0) {
-    const ptsMap = {};
-    authors.forEach(a => { ptsMap[a.full_name] = pctToPts(a.contribution_percent, totalPct, 5); });
-    setTimeout(() => {
-      document.querySelectorAll('#sw-pts-rows .pts-row-item').forEach(r => {
-        const inp = r.querySelector('input');
-        if (inp && ptsMap[r.dataset.name] !== undefined) inp.value = ptsMap[r.dataset.name];
-      });
-      recalcPts();
-    }, 50);
-  }
+  recalcSwPts();   // баллы считаются из вклада автоматически
 }
 
 function isoDate(ddmmyyyy) {
@@ -358,19 +353,19 @@ function isoDate(ddmmyyyy) {
 // ─── ARTICLE PANEL ─────────────────────────────────────────────────────────
 let _artDocxFilename = null;
 
-function buildArticlePanel(type) {
+function buildArticlePanel(type, embed) {
   const labels = { article_vak_rinc: 'ВАК + РИНЦ · п.27.1 · 8 б.', article_rinc: 'РИНЦ · п.27.2 · 5 б.', article_closed: 'Закрытое издание · п.27.3 · 5 б.' };
   const maxPts = WEIGHTS[type] || 5;
-  return `<div class="panel-title">Статья: ${labels[type]} <button class="btn btn-secondary btn-sm" onclick="closePanel()">✕ закрыть</button></div>
+  return `${embed ? '' : `<div class="panel-title">Статья: ${labels[type]} <button class="btn btn-secondary btn-sm" onclick="closePanel()">${ic('close')} закрыть</button></div>`}
     <div class="mode-toggle">
-      <button id="art-btn-upload" class="mode-btn active" onclick="artMode('upload')">📂 Загрузить файл</button>
-      <button id="art-btn-manual" class="mode-btn" onclick="artMode('manual')">✏ Ввести вручную</button>
+      <button id="art-btn-upload" class="mode-btn active" onclick="artMode('upload')">${ic('folder')} Загрузить файл</button>
+      <button id="art-btn-manual" class="mode-btn" onclick="artMode('manual')">${ic('edit')} Ввести вручную</button>
     </div>
 
     <div id="art-upload-zone">
-      <label style="cursor:pointer;display:block;border:2px dashed #d1d5db;border-radius:8px;padding:24px;text-align:center;color:#888;font-size:13px">
+      <label style="cursor:pointer;display:block;border:1.5px dashed var(--border2);border-radius:8px;padding:24px;text-align:center;color:var(--text-4);font-size:13px">
         <input type="file" id="art-file-input" accept=".docx" style="display:none" onchange="parseArticleFile(this)">
-        📄 Перетащите докладную записку (.docx) или нажмите для выбора
+        ${ic('file')} Перетащите докладную записку (.docx) или нажмите для выбора
       </label>
       <div id="art-parse-result" style="margin-top:10px"></div>
     </div>
@@ -384,8 +379,8 @@ function buildArticlePanel(type) {
       </div>
       <div style="margin-top:14px">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-          <span style="font-size:12px;font-weight:600;color:#444">Авторы и баллы</span>
-          <span id="art-pts-total" style="font-size:12px;color:#888">0 / ${maxPts} б.</span>
+          <span style="font-size:12px;font-weight:600;color:var(--text-2)">Авторы и баллы</span>
+          <span id="art-pts-total" style="font-size:12px;color:var(--text-4)">0 / ${maxPts} б.</span>
         </div>
         <table class="data-table" style="margin-bottom:6px">
           <thead><tr><th>ФИО</th><th style="width:90px;text-align:center">Баллов</th><th style="width:28px"></th></tr></thead>
@@ -393,9 +388,9 @@ function buildArticlePanel(type) {
         </table>
         <button class="add-btn" onclick="addArtAuthorRow()">+ Автора</button>
       </div>
-      <div style="margin-top:12px">
+      ${embed ? '' : `<div style="margin-top:12px">
         <button class="btn btn-primary btn-sm" onclick="addArticleToReport('${type}')">+ Добавить в отчёт</button>
-      </div>
+      </div>`}
     </div>`;
 }
 
@@ -411,7 +406,7 @@ async function parseArticleFile(input) {
   const fd = new FormData();
   fd.append('file', input.files[0]);
   const pr = document.getElementById('art-parse-result');
-  pr.innerHTML = '<span style="color:#888;font-size:12px">Обработка...</span>';
+  pr.innerHTML = '<span style="color:var(--text-4);font-size:12px">Обработка...</span>';
   try {
     const resp = await fetch('/api/articles/parse', { method: 'POST', body: fd });
     if (!resp.ok) { const e = await resp.json().catch(()=>({detail:'Ошибка'})); pr.innerHTML = `<div class="err-box">${e.detail}</div>`; return; }
@@ -421,10 +416,10 @@ async function parseArticleFile(input) {
       _fillArtForm(entries[0]); artMode('manual');
     } else {
       window._artParsedEntries = entries;
-      pr.innerHTML = `<div style="font-size:12px;color:#555;margin-bottom:6px">Найдено статей: <b>${entries.length}</b>. Выберите нужную:</div>` +
-        entries.map((e, i) => `<div onclick="artSelectEntry(${i})" style="padding:7px 10px;margin-bottom:4px;background:#f9f9f9;border:1px solid #e5e5e5;border-radius:6px;cursor:pointer">
+      pr.innerHTML = `<div style="font-size:12px;color:var(--text-3);margin-bottom:6px">Найдено статей: <b>${entries.length}</b>. Выберите нужную:</div>` +
+        entries.map((e, i) => `<div onclick="artSelectEntry(${i})" style="padding:7px 10px;margin-bottom:4px;background:var(--bg);border:1px solid var(--border);border-radius:6px;cursor:pointer">
           <div style="font-size:12px;font-weight:600">${e.title.substring(0,70)}${e.title.length>70?'…':''}</div>
-          <div style="font-size:11px;color:#888;margin-top:2px">${e.publication.substring(0,70)}</div>
+          <div style="font-size:11px;color:var(--text-4);margin-top:2px">${e.publication.substring(0,70)}</div>
         </div>`).join('');
     }
   } catch(err) { pr.innerHTML = `<div class="err-box">Ошибка: ${err.message}</div>`; }
@@ -466,7 +461,7 @@ function addArtAuthorRow(name = '', pts = 0) {
   tr.innerHTML = `
     <td><input type="text" value="${name}" placeholder="Иванов И.И." style="width:100%" oninput="updateArtPtsTotal()"></td>
     <td style="text-align:center"><input type="number" value="${pts}" min="0" max="${_artMaxPts()}" step="0.1" style="width:70px;text-align:center" oninput="updateArtPtsTotal()"></td>
-    <td><button onclick="this.closest('tr').remove();updateArtPtsTotal()" style="background:none;border:none;cursor:pointer;color:#aaa;font-size:14px">✕</button></td>`;
+    <td><button onclick="this.closest('tr').remove();updateArtPtsTotal()" style="background:none;border:none;cursor:pointer;color:var(--text-5);font-size:14px">${ic('close')}</button></td>`;
   tbody.appendChild(tr);
   updateArtPtsTotal();
 }
@@ -479,16 +474,17 @@ function updateArtPtsTotal() {
   const el = document.getElementById('art-pts-total');
   if (el) {
     el.textContent = sum.toFixed(1) + ' / ' + max + ' б.';
-    el.style.color = sum > max ? '#dc2626' : (sum === max ? '#16a34a' : '#888');
+    el.style.color = sum > max ? 'var(--danger)' : (sum === max ? '#6FC99A' : 'var(--text-4)');
   }
 }
 
-function addArticleToReport(type) {
+// Сбор и валидация данных формы статьи. Возвращает {data, sub, myPts} или null.
+// Один источник истины для inline-добавления и регистрации в картотеку.
+function collectArticleData(type) {
   const title = document.getElementById('art-title').value.trim();
   const pub = document.getElementById('art-pub').value.trim();
-  if (!title) { alert('Введите название статьи'); return; }
+  if (!title) { alert('Введите название статьи'); return null; }
 
-  // Collect authors
   const authorList = [];
   document.querySelectorAll('#art-authors-body tr').forEach(tr => {
     const inputs = tr.querySelectorAll('input');
@@ -496,31 +492,40 @@ function addArticleToReport(type) {
     const pts = parseFloat(inputs[1].value) || 0;
     if (name) authorList.push({ full_name: name, points: pts });
   });
-  if (!authorList.length) { alert('Добавьте хотя бы одного автора'); return; }
+  if (!authorList.length) { alert('Добавьте хотя бы одного автора'); return null; }
 
   const maxPts = WEIGHTS[type] || 5;
-  // В личный отчёт идут только баллы автора, совпадающего с профилем
   let myPts = myPointsFrom(authorList, 'points');
   myPts = Math.min(Math.max(myPts, 0), maxPts);
-  if (myPts <= 0) { alert(noMyPointsMsg()); return; }
+  if (myPts <= 0) { alert(noMyPointsMsg()); return null; }
 
   const typeKey = type.replace('article_', '');
   const sub = ART_LABELS[typeKey] + (pub ? ' · ' + pub : '');
+  return {
+    data: { title, publication: pub, article_type: typeKey, points_taken: myPts,
+            author_list: authorList, docx_filename: _artDocxFilename || null },
+    sub, myPts, title,
+  };
+}
+
+function addArticleToReport(type) {
+  const collected = collectArticleData(type);
+  if (!collected) return;
+  const { data, sub, myPts, title } = collected;
 
   if (state.editingItemKey) {
     const item = state.addedItems.find(i => i.key === state.editingItemKey);
     if (item) {
       item.label = title; item.sub = sub; item.pts = myPts;
-      item.data = { title, publication: pub, article_type: typeKey, points_taken: myPts, author_list: authorList };
+      item.data = { ...item.data, ...data };   // сохраняем id для upsert
+      item._dirty = true;
     }
     state.editingItemKey = null;
     updateScore(); closePanel();
     return;
   }
 
-  const docxFn = _artDocxFilename || null;
-  addItem('article', '📰', title, sub, myPts,
-    { title, publication: pub, article_type: typeKey, points_taken: myPts, author_list: authorList, docx_filename: docxFn });
+  addItem('article', ic('article'), title, sub, myPts, data);
   _artDocxFilename = null;
   // Reset manual form
   document.getElementById('art-title').value = '';
@@ -532,7 +537,7 @@ function addArticleToReport(type) {
   artMode('upload');
   const p = state.profile;
   const initials = (p.first_patronymic || '').split(' ').filter(Boolean).map(w => w[0] + '.').join('');
-  addArtAuthorRow(p.last_name ? p.last_name + (initials ? ' ' + initials : '') : '', maxPts);
+  addArtAuthorRow(p.last_name ? p.last_name + (initials ? ' ' + initials : '') : '', WEIGHTS[type] || 5);
 }
 
 // ─── CONFERENCE PANEL (п.24) ─────────────────────────────────────────────────
@@ -541,7 +546,7 @@ let _confCertFilename = null;
 
 function buildConferencePanel() {
   return `<div class="panel-title">Доклад на конференции (п.24 · 5 б.)
-    <button class="btn btn-secondary btn-sm" onclick="closePanel()">✕ закрыть</button></div>
+    <button class="btn btn-secondary btn-sm" onclick="closePanel()">${ic('close')} закрыть</button></div>
     <div class="form-grid" style="margin-bottom:12px">
       <div class="field full"><label>Конференция / тема доклада</label>
         <input type="text" id="conf-title" placeholder="Напр.: II Всероссийская НПК «…» — доклад «…»"></div>
@@ -549,12 +554,12 @@ function buildConferencePanel() {
     <div class="field full" style="margin-bottom:12px">
       <label>Сертификат участия (изображение или PDF)</label>
       <label class="upload-label" id="conf-cert-label" style="display:inline-flex;margin-top:4px">
-        <span>📎 Выбрать файл</span>
+        <span>${ic('paperclip')} Выбрать файл</span>
         <input type="file" accept="image/*,.pdf" style="display:none" onchange="uploadConferenceCert(this)">
       </label>
-      <div style="font-size:11px;color:#aaa;margin-top:6px">Документ не распознаётся — прикладывается к отчёту и попадает в архив как подтверждение.</div>
+      <div style="font-size:11px;color:var(--text-5);margin-top:6px">Документ не распознаётся — прикладывается к отчёту и попадает в архив как подтверждение.</div>
     </div>
-    <button class="btn btn-primary" onclick="addConferenceToReport()">✓ Добавить в отчёт</button>`;
+    <button class="btn btn-primary" onclick="addConferenceToReport()">${ic('check')} Добавить в отчёт</button>`;
 }
 
 async function uploadConferenceCert(input) {
@@ -566,7 +571,7 @@ async function uploadConferenceCert(input) {
     const d = await r.json();
     _confCertFilename = d.filename;
     const lbl = document.getElementById('conf-cert-label');
-    if (lbl) { lbl.className = 'upload-label has-file'; lbl.querySelector('span').textContent = '📎 ' + input.files[0].name; }
+    if (lbl) { lbl.className = 'upload-label has-file'; lbl.querySelector('span').innerHTML = ic('paperclip') + ' ' + input.files[0].name; }
   } catch(e) { alert('Ошибка загрузки: ' + e.message); }
 }
 
@@ -585,7 +590,7 @@ function addConferenceToReport() {
     return;
   }
 
-  addItem('conference', '🎤', label, 'п.24 · Доклад на конференции', pts, data);
+  addItem('conference', ic('conference'), label, 'п.24 · Доклад на конференции', pts, data);
   _confCertFilename = null;
   closePanel();
 }

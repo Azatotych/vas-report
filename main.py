@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import os
 from pathlib import Path
-from datetime import date
+from datetime import date, datetime
 from html import escape
 import re
 
@@ -13,6 +13,10 @@ from db import get_db, init_db
 from parsers import parse_order_docx, parse_software_docx, parse_article_docx
 from export import generate_report_xlsx
 from software_doc import generate_software_docx
+import plan_calc
+from plan_doc import generate_plan_docx, MONTHS_RU
+
+APP_VERSION = "2.1.0"   # 2.0 — редизайн (картотека/дашборд/проверка); 2.1 — уведомления
 
 BASE = Path(__file__).parent
 UPLOADS_DIR = BASE / "uploads"
@@ -29,6 +33,11 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 @app.on_event("startup")
 def startup():
     init_db()
+
+
+@app.get("/api/version")
+def get_version():
+    return {"version": APP_VERSION}
 
 
 # ── AUTH HELPERS ──────────────────────────────────────────────────────────────
@@ -58,6 +67,29 @@ def _require(data: dict, *keys: str):
         raise HTTPException(400, f"Не заполнены обязательные поля: {', '.join(missing)}")
 
 
+def _current_period() -> tuple:
+    """Текущий отчётный период (год, месяц) по системной дате."""
+    now = datetime.now()
+    return now.year, now.month
+
+
+def _is_current_period(year: int, month: int) -> bool:
+    cy, cm = _current_period()
+    return int(year) == cy and int(month) == cm
+
+
+def _delete_upload(filename: str):
+    """Тихо удалить файл из uploads/ (для чистки осиротевших вложений)."""
+    if not filename:
+        return
+    try:
+        p = (UPLOADS_DIR / filename).resolve()
+        if p.parent == UPLOADS_DIR.resolve() and p.exists():
+            p.unlink()
+    except Exception:
+        pass
+
+
 def _safe_upload_path(filename: str) -> Path:
     path = (UPLOADS_DIR / filename).resolve()
     try:
@@ -74,7 +106,8 @@ def list_users_public():
     """Public: returns users for the login screen (dev mode — no passwords)."""
     conn = get_db()
     rows = conn.execute(
-        "SELECT id, username, role, last_name, first_patronymic, position FROM users ORDER BY role DESC, last_name"
+        "SELECT id, username, role, last_name, first_patronymic, position FROM users "
+        "WHERE active=1 ORDER BY role DESC, last_name"
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
@@ -184,8 +217,10 @@ def delete_user(uid: int, request: Request):
     sv = _require_supervisor(request)
     if uid == sv['id']:
         raise HTTPException(400, "Нельзя удалить собственный аккаунт")
+    # Мягкое удаление: аккаунт уходит из логина и списков, но его отчёты/РИД
+    # остаются в общем архиве с привязкой к ФИО (целостность учёта).
     conn = get_db()
-    conn.execute("DELETE FROM users WHERE id=?", (uid,))
+    conn.execute("UPDATE users SET active=0 WHERE id=?", (uid,))
     conn.commit()
     conn.close()
     return {"ok": True}
@@ -258,6 +293,22 @@ async def update_order(order_id: int, request: Request):
     return {"ok": True}
 
 
+@app.delete("/api/orders/all")
+def clear_all_orders(request: Request):
+    """Очистить реестр приказов текущего сотрудника. Сначала снимаем ссылки из
+    сданных отчётов (report_orders), затем удаляем сами приказы."""
+    user = _current_user(request)
+    uid = user['id']
+    conn = get_db()
+    conn.execute(
+        "DELETE FROM report_orders WHERE order_id IN (SELECT id FROM orders WHERE user_id=?)",
+        (uid,))
+    conn.execute("DELETE FROM orders WHERE user_id=?", (uid,))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
 @app.delete("/api/orders/{order_id}")
 def delete_order(order_id: int, request: Request):
     user = _current_user(request)
@@ -283,17 +334,20 @@ async def parse_order_file(request: Request, file: UploadFile = File(...)):
 # ── FILE UPLOADS ──────────────────────────────────────────────────────────────
 
 @app.post("/api/upload/confirmation")
-async def upload_confirmation(file: UploadFile = File(...), order_id: str = Form("")):
-    safe_name = re.sub(r'[^\w.\-]', '_', file.filename)
-    filename = f"confirm_{order_id}_{safe_name}"
+async def upload_confirmation(request: Request, file: UploadFile = File(...), order_id: str = Form("")):
+    user = _current_user(request)
+    safe_name = re.sub(r'[^\w.\-]', '_', file.filename or 'file')
+    # уникальный префикс (пользователь + время), чтобы файлы не перетирали друг друга
+    filename = f"confirm_{user['id']}_{order_id}_{int(datetime.now().timestamp()*1000)}_{safe_name}"
     (UPLOADS_DIR / filename).write_bytes(await file.read())
     return {"filename": filename}
 
 
 @app.post("/api/upload/conference")
-async def upload_conference(file: UploadFile = File(...)):
+async def upload_conference(request: Request, file: UploadFile = File(...)):
+    user = _current_user(request)
     safe_name = re.sub(r'[^\w.\-]', '_', file.filename or 'certificate')
-    filename = f"conf_{safe_name}"
+    filename = f"conf_{user['id']}_{int(datetime.now().timestamp()*1000)}_{safe_name}"
     (UPLOADS_DIR / filename).write_bytes(await file.read())
     return {"filename": filename}
 
@@ -386,9 +440,43 @@ def get_software(request: Request):
     return result
 
 
+@app.delete("/api/software/all")
+def clear_all_software(request: Request):
+    """Очистить базу ПО текущего сотрудника — все карточки, включая поданные.
+    Сначала снимаем ссылки из сданных отчётов (report_software), затем удаляем
+    ПО (авторы удаляются каскадом) и связанные .docx-файлы. Статьи не трогаем."""
+    user = _current_user(request)
+    uid = user['id']
+    conn = get_db()
+    files = conn.execute("SELECT docx_filename FROM software WHERE user_id=?", (uid,)).fetchall()
+    conn.execute(
+        "DELETE FROM report_software WHERE software_id IN (SELECT id FROM software WHERE user_id=?)",
+        (uid,))
+    conn.execute("DELETE FROM software WHERE user_id=?", (uid,))
+    conn.commit()
+    conn.close()
+    for f in files:
+        _delete_upload(f['docx_filename'])
+    return {"ok": True}
+
+
+@app.delete("/api/software/{sw_id}")
+def delete_software(sw_id: int, request: Request):
+    """Удаление ПО из картотеки — только если ещё не подано (is_used=0)."""
+    user = _current_user(request)
+    conn = get_db()
+    row = conn.execute("SELECT docx_filename FROM software WHERE id=? AND is_used=0 AND user_id=?", (sw_id, user['id'])).fetchone()
+    conn.execute("DELETE FROM software WHERE id=? AND is_used=0 AND user_id=?", (sw_id, user['id']))
+    conn.commit()
+    conn.close()
+    if row:
+        _delete_upload(row['docx_filename'])
+    return {"ok": True}
+
+
 @app.post("/api/software/parse")
 async def parse_software_file(request: Request, file: UploadFile = File(...)):
-    _current_user(request)
+    user = _current_user(request)
     safe_name = re.sub(r'[^\w.\-]', '_', file.filename)
     filename = f"sw_{safe_name}"
     path = UPLOADS_DIR / filename
@@ -397,8 +485,24 @@ async def parse_software_file(request: Request, file: UploadFile = File(...)):
         results = parse_software_docx(str(path))
         if not results:
             raise HTTPException(400, "Не найдено ни одной программы в документе")
+        conn = get_db()
         for entry in results:
             entry['docx_filename'] = filename
+            # уже использовано (подано в отчёт) / уже лежит в картотеке?
+            cert = (entry.get('certificate_number') or '').strip()
+            entry['already_used'] = False
+            entry['in_bank'] = False
+            if cert:
+                row = conn.execute(
+                    "SELECT is_used FROM software WHERE certificate_number=? AND user_id=?",
+                    (cert, user['id'])
+                ).fetchone()
+                if row:
+                    if row['is_used']:
+                        entry['already_used'] = True
+                    else:
+                        entry['in_bank'] = True
+        conn.close()
         return results
     except HTTPException:
         raise
@@ -417,8 +521,9 @@ async def create_software(request: Request):
         "SELECT id, is_used FROM software WHERE certificate_number=? AND user_id=?", (cert, user['id'])
     ).fetchone()
     if existing and existing['is_used']:
+        # ПО уже подавалось в отчёт — не дублируем в картотеку, остаётся в архиве «Поданы»
         conn.close()
-        raise HTTPException(400, "Это свидетельство уже было подано в одном из отчётов")
+        return {"id": existing['id'], "ok": True, "already_used": True}
 
     docx_filename = data.get('docx_filename')
     if not docx_filename:
@@ -518,39 +623,39 @@ async def parse_article_file(request: Request, file: UploadFile = File(...)):
         raise HTTPException(400, f"Ошибка парсинга: {e}")
 
 
-@app.post("/api/parse/batch")
-async def parse_batch(request: Request, files: list[UploadFile] = File(...)):
-    _current_user(request)
-    results = []
-    for upload in files:
-        safe = re.sub(r'[^\w.\-]', '_', upload.filename or 'file.docx')
-        fname = f"batch_{safe}"
-        path = UPLOADS_DIR / fname
-        path.write_bytes(await upload.read())
-        for entry in parse_software_docx(str(path)):
-            entry['kind'] = 'software'
-            entry['docx_filename'] = fname
-            results.append(entry)
-        for entry in parse_article_docx(str(path)):
-            entry['kind'] = 'article'
-            entry['article_type'] = 'rinc'
-            entry['docx_filename'] = fname
-            results.append(entry)
-    return results
-
-
 @app.post("/api/articles")
 async def create_article(request: Request):
     user = _current_user(request)
     data = await request.json()
     _require(data, 'title', 'article_type')
     conn = get_db()
-    conn.execute(
-        "INSERT INTO articles (user_id, title, publication, authors, article_type, docx_filename) VALUES (?,?,?,?,?,?)",
-        (user['id'], data['title'], data.get('publication', ''), data.get('authors', ''),
-         data['article_type'], data.get('docx_filename', ''))
-    )
-    aid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    # upsert по id (правки статьи при доработке отчёта обновляют запись, без дублей)
+    aid = data.get('id')
+    existing = None
+    if aid:
+        existing = conn.execute(
+            "SELECT id, is_used FROM articles WHERE id=? AND user_id=?", (aid, user['id'])
+        ).fetchone()
+        if existing and existing['is_used']:
+            conn.close()
+            raise HTTPException(400, "Эта статья уже была подана в одном из отчётов")
+
+    if existing:
+        conn.execute(
+            "UPDATE articles SET title=?, publication=?, authors=?, article_type=?, docx_filename=? WHERE id=?",
+            (data['title'], data.get('publication', ''), data.get('authors', ''),
+             data['article_type'], data.get('docx_filename', ''), aid)
+        )
+    else:
+        conn.execute(
+            "INSERT INTO articles (user_id, title, publication, authors, article_type, docx_filename) VALUES (?,?,?,?,?,?)",
+            (user['id'], data['title'], data.get('publication', ''), data.get('authors', ''),
+             data['article_type'], data.get('docx_filename', ''))
+        )
+        aid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    conn.execute("DELETE FROM article_authors WHERE article_id=?", (aid,))
     for a in data.get('author_list', []):
         conn.execute(
             "INSERT INTO article_authors (article_id, full_name, points) VALUES (?,?,?)",
@@ -565,9 +670,12 @@ async def create_article(request: Request):
 def delete_article(article_id: int, request: Request):
     user = _current_user(request)
     conn = get_db()
+    row = conn.execute("SELECT docx_filename FROM articles WHERE id=? AND is_used=0 AND user_id=?", (article_id, user['id'])).fetchone()
     conn.execute("DELETE FROM articles WHERE id=? AND is_used=0 AND user_id=?", (article_id, user['id']))
     conn.commit()
     conn.close()
+    if row:
+        _delete_upload(row['docx_filename'])
     return {"ok": True}
 
 
@@ -595,19 +703,46 @@ def _get_report_data(report_id: int) -> dict:
         "SELECT id, title, certificate_filename, points_taken FROM conferences WHERE report_id=?",
         (report_id,)
     ).fetchall()
+    author = conn.execute(
+        "SELECT username, last_name, first_patronymic, position, rank FROM users WHERE id=?",
+        (report['user_id'],)
+    ).fetchone()
+
+    # авторы ПО/статей — нужны, чтобы при доработке отчёта черновик
+    # восстанавливался полностью (иначе авторы «слетают»)
+    software = []
+    for s in sw_list:
+        sd = dict(s)
+        sd['authors'] = [dict(a) for a in conn.execute(
+            "SELECT full_name, position, contribution_percent, points_claimed "
+            "FROM software_authors WHERE software_id=? ORDER BY id", (s['id'],)
+        ).fetchall()]
+        software.append(sd)
+    articles = []
+    for a in arts:
+        ad = dict(a)
+        ad['authors'] = [dict(x) for x in conn.execute(
+            "SELECT full_name, points FROM article_authors WHERE article_id=? ORDER BY id", (a['id'],)
+        ).fetchall()]
+        articles.append(ad)
+
     conn.close()
     return {
         **dict(report),
+        **(dict(author) if author else {}),
         "orders": [dict(o) for o in orders],
-        "software": [dict(s) for s in sw_list],
-        "articles": [dict(a) for a in arts],
+        "software": software,
+        "articles": articles,
         "conferences": [dict(c) for c in confs],
     }
 
 
 @app.delete("/api/reports/all")
 def clear_all_reports(request: Request):
-    """Testing utility: clears current user's data."""
+    """Очистить историю отчётов текущего сотрудника: удаляются только сами отчёты
+    (со связанными строками — каскадом), файлы .xlsx и снимаются пометки
+    «использовано» с ПО/статей, чтобы они вернулись в картотеку. Приказы, ПО и
+    статьи как записи остаются."""
     user = _current_user(request)
     uid = user['id']
     conn = get_db()
@@ -617,9 +752,9 @@ def clear_all_reports(request: Request):
         if p and p.exists():
             p.unlink()
     conn.execute("DELETE FROM monthly_reports WHERE user_id=?", (uid,))
-    conn.execute("DELETE FROM software WHERE user_id=?", (uid,))
-    conn.execute("DELETE FROM articles WHERE user_id=?", (uid,))
-    conn.execute("DELETE FROM orders WHERE user_id=?", (uid,))
+    # вернуть ПО/статьи в картотеку (после удаления отчётов они ничем не «поданы»)
+    conn.execute("UPDATE software SET is_used=0, used_month=NULL, used_year=NULL WHERE user_id=?", (uid,))
+    conn.execute("UPDATE articles SET is_used=0, used_month=NULL, used_year=NULL WHERE user_id=?", (uid,))
     conn.commit()
     conn.close()
     return {"ok": True}
@@ -649,6 +784,44 @@ def get_report(report_id: int, request: Request):
     return _get_report_data(report_id)
 
 
+@app.post("/api/reports/{report_id}/reopen")
+def reopen_report(report_id: int, request: Request):
+    """Доработка ОТКЛОНЁННОГО отчёта сотрудником: снимаем поданную версию,
+    возвращаем связанные ПО/статьи в картотеку (is_used=0) и отдаём позиции,
+    чтобы фронтенд восстановил черновик. Сам месяц освобождается для новой подачи."""
+    user = _current_user(request)
+    conn = get_db()
+    row = conn.execute("SELECT user_id, status, year, month, xlsx_path FROM monthly_reports WHERE id=?", (report_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "Отчёт не найден")
+    if row['user_id'] != user['id']:
+        conn.close()
+        raise HTTPException(403, "Доступ запрещён")
+    if row['status'] not in ('submitted', 'rejected'):
+        conn.close()
+        raise HTTPException(400, "Дорабатывать можно отчёт на проверке или отклонённый")
+    if not _is_current_period(row['year'], row['month']):
+        conn.close()
+        raise HTTPException(400, "Прошлые месяцы закрыты — доработка доступна только за текущий месяц")
+
+    data = _get_report_data(report_id)   # собираем позиции до удаления
+
+    for s in conn.execute("SELECT software_id FROM report_software WHERE report_id=?", (report_id,)).fetchall():
+        conn.execute("UPDATE software SET is_used=0, used_month=NULL, used_year=NULL WHERE id=?", (s['software_id'],))
+    for a in conn.execute("SELECT article_id FROM report_articles WHERE report_id=?", (report_id,)).fetchall():
+        conn.execute("UPDATE articles SET is_used=0, used_month=NULL, used_year=NULL WHERE id=?", (a['article_id'],))
+
+    if row['xlsx_path']:
+        p = Path(row['xlsx_path'])
+        if p.exists():
+            p.unlink()
+    conn.execute("DELETE FROM monthly_reports WHERE id=?", (report_id,))   # каскадом снимает связи
+    conn.commit()
+    conn.close()
+    return data
+
+
 @app.post("/api/reports/submit")
 async def submit_report(request: Request):
     user = _current_user(request)
@@ -657,6 +830,9 @@ async def submit_report(request: Request):
     year = data['year']
     month = data['month']
     uid = user['id']
+
+    if not _is_current_period(year, month):
+        raise HTTPException(400, "Отчёт можно подавать только за текущий месяц")
 
     conn = get_db()
     if conn.execute(
@@ -764,6 +940,523 @@ def export_report(report_id: int, request: Request):
     )
 
 
+# ── ЛИЧНЫЙ ПЛАН ───────────────────────────────────────────────────────────────
+
+def _own_plan(conn, user: dict, plan_id: int) -> dict:
+    row = conn.execute("SELECT * FROM work_plans WHERE id=?", (plan_id,)).fetchone()
+    if not row or row['user_id'] != user['id']:
+        conn.close()
+        raise HTTPException(404, "План не найден")
+    return dict(row)
+
+
+def _plan_nir_months(conn, nir_ids: list) -> dict:
+    """{nir_id: {month: hours}}"""
+    out = {nid: {} for nid in nir_ids}
+    if nir_ids:
+        q = "SELECT nir_id, month, hours FROM plan_nir_months WHERE nir_id IN (%s)" % \
+            ",".join("?" * len(nir_ids))
+        for r in conn.execute(q, nir_ids).fetchall():
+            out[r['nir_id']][r['month']] = r['hours']
+    return out
+
+
+def _plan_bundle(conn, uid: int, year: int) -> dict:
+    plan = conn.execute("SELECT * FROM work_plans WHERE user_id=? AND year=?",
+                        (uid, year)).fetchone()
+    eternal = [dict(r) for r in conn.execute(
+        "SELECT * FROM eternal_operatives WHERE user_id=? AND is_active=1 "
+        "ORDER BY sort_order, id", (uid,)).fetchall()]
+    eternal_total = sum(o['hours_month'] for o in eternal)
+    if not plan:
+        return {"plan": None, "year": year, "eternal_ops": eternal,
+                "eternal_total": eternal_total}
+    plan = dict(plan)
+    nirs = [dict(r) for r in conn.execute(
+        "SELECT * FROM plan_nirs WHERE plan_id=? ORDER BY sort_order, id",
+        (plan['id'],)).fetchall()]
+    months = [dict(r) for r in conn.execute(
+        "SELECT * FROM plan_months WHERE plan_id=? ORDER BY month",
+        (plan['id'],)).fetchall()]
+    nir_months = _plan_nir_months(conn, [n['id'] for n in nirs])
+    for n in nirs:
+        n['months'] = nir_months[n['id']]
+    norms = {}
+    for r in months:
+        m = r['month']
+        norms[m] = (sum(nm.get(m, 0) for nm in nir_months.values())
+                    + r['hours_articles'] + r['hours_operatives']
+                    + r['hours_naryady'] + r['hours_guk'])
+    return {
+        "plan": plan, "year": year, "nirs": nirs, "months": months,
+        "eternal_ops": eternal, "eternal_total": eternal_total, "norms": norms,
+        "vacation": plan_calc.vacation_summary(plan, nirs, months),
+        "warnings": plan_calc.validate(plan, nirs, months, nir_months, eternal_total),
+    }
+
+
+@app.get("/api/plan")
+def get_plan(request: Request, year: int = 0):
+    user = _current_user(request)
+    if not year:
+        year = _current_period()[0]
+    conn = get_db()
+    bundle = _plan_bundle(conn, user['id'], year)
+    conn.close()
+    return bundle
+
+
+@app.post("/api/plan")
+async def save_plan(request: Request):
+    user = _current_user(request)
+    data = await request.json()
+    _require(data, 'year')
+    year = int(data['year'])
+    fields = (
+        int(data.get('hours_articles') or 0),
+        int(data.get('hours_operatives') or 0),
+        int(data.get('hours_naryady') or 0),
+        int(data.get('hours_guk') or 0),
+        (data.get('fio_genitive') or '').strip(),
+        (data.get('approver_position') or 'Начальник 5 научно-исследовательского отдела').strip(),
+        (data.get('approver_rank') or 'подполковник').strip(),
+        (data.get('approver_name') or 'С.Тихонов').strip(),
+    )
+    conn = get_db()
+    row = conn.execute("SELECT id FROM work_plans WHERE user_id=? AND year=?",
+                       (user['id'], year)).fetchone()
+    if row:
+        pid = row['id']
+        conn.execute(
+            "UPDATE work_plans SET hours_articles=?, hours_operatives=?, hours_naryady=?, "
+            "hours_guk=?, fio_genitive=?, approver_position=?, approver_rank=?, "
+            "approver_name=? WHERE id=?", fields + (pid,))
+    else:
+        conn.execute(
+            "INSERT INTO work_plans (user_id, year, hours_articles, hours_operatives, "
+            "hours_naryady, hours_guk, fio_genitive, approver_position, approver_rank, "
+            "approver_name) VALUES (?,?,?,?,?,?,?,?,?,?)", (user['id'], year) + fields)
+        pid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    for m in range(1, 13):
+        conn.execute("INSERT OR IGNORE INTO plan_months (plan_id, month) VALUES (?,?)",
+                     (pid, m))
+    for mr in (data.get('months') or []):
+        conn.execute("UPDATE plan_months SET fund_hours=? WHERE plan_id=? AND month=?",
+                     (int(mr.get('fund_hours') or 0), pid, int(mr['month'])))
+    conn.commit()
+    bundle = _plan_bundle(conn, user['id'], year)
+    conn.close()
+    return bundle
+
+
+@app.post("/api/plan/{plan_id}/nirs")
+async def add_plan_nir(plan_id: int, request: Request):
+    user = _current_user(request)
+    data = await request.json()
+    _require(data, 'name')
+    conn = get_db()
+    _own_plan(conn, user, plan_id)
+    dm = data.get('deadline_month')
+    conn.execute(
+        "INSERT INTO plan_nirs (plan_id, name, deadline_month, hours_year, sort_order) "
+        "VALUES (?,?,?,?,?)",
+        (plan_id, data['name'].strip(), int(dm) if dm else None,
+         int(data.get('hours_year') or 0), int(data.get('sort_order') or 0)))
+    nid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.commit()
+    conn.close()
+    return {"id": nid}
+
+
+@app.put("/api/plan/nirs/{nir_id}")
+async def update_plan_nir(nir_id: int, request: Request):
+    user = _current_user(request)
+    data = await request.json()
+    conn = get_db()
+    row = conn.execute(
+        "SELECT n.*, p.user_id FROM plan_nirs n JOIN work_plans p ON n.plan_id=p.id "
+        "WHERE n.id=?", (nir_id,)).fetchone()
+    if not row or row['user_id'] != user['id']:
+        conn.close()
+        raise HTTPException(404, "НИР не найдена")
+    dm = data.get('deadline_month', row['deadline_month'])
+    conn.execute(
+        "UPDATE plan_nirs SET name=?, deadline_month=?, hours_year=? WHERE id=?",
+        ((data.get('name') or row['name']).strip(), int(dm) if dm else None,
+         int(data.get('hours_year') if data.get('hours_year') is not None
+             else row['hours_year']), nir_id))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+@app.delete("/api/plan/nirs/{nir_id}")
+def delete_plan_nir(nir_id: int, request: Request):
+    user = _current_user(request)
+    conn = get_db()
+    row = conn.execute(
+        "SELECT n.id, p.user_id FROM plan_nirs n JOIN work_plans p ON n.plan_id=p.id "
+        "WHERE n.id=?", (nir_id,)).fetchone()
+    if not row or row['user_id'] != user['id']:
+        conn.close()
+        raise HTTPException(404, "НИР не найдена")
+    conn.execute("DELETE FROM plan_nirs WHERE id=?", (nir_id,))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+@app.put("/api/plan/{plan_id}/vacation")
+async def update_plan_vacation(plan_id: int, request: Request):
+    user = _current_user(request)
+    data = await request.json()
+    conn = get_db()
+    plan = _own_plan(conn, user, plan_id)
+    for mr in (data.get('months') or []):
+        conn.execute("UPDATE plan_months SET vacation_days=? WHERE plan_id=? AND month=?",
+                     (int(mr.get('vacation_days') or 0), plan_id, int(mr['month'])))
+    conn.commit()
+    bundle = _plan_bundle(conn, user['id'], plan['year'])
+    conn.close()
+    return bundle
+
+
+@app.post("/api/plan/{plan_id}/distribute")
+def distribute_plan(plan_id: int, request: Request):
+    user = _current_user(request)
+    conn = get_db()
+    plan = _own_plan(conn, user, plan_id)
+    nirs = [dict(r) for r in conn.execute(
+        "SELECT * FROM plan_nirs WHERE plan_id=? ORDER BY sort_order, id",
+        (plan_id,)).fetchall()]
+    months = [dict(r) for r in conn.execute(
+        "SELECT * FROM plan_months WHERE plan_id=? ORDER BY month", (plan_id,)).fetchall()]
+    eternal_total = conn.execute(
+        "SELECT COALESCE(SUM(hours_month),0) FROM eternal_operatives "
+        "WHERE user_id=? AND is_active=1", (user['id'],)).fetchone()[0]
+    res = plan_calc.distribute(plan, nirs, months, eternal_total)
+    for m in range(1, 13):
+        c = res['cells'][m]
+        conn.execute(
+            "UPDATE plan_months SET hours_articles=?, hours_operatives=?, "
+            "hours_naryady=?, hours_guk=? WHERE plan_id=? AND month=?",
+            (c['articles'], c['operatives'], c['naryady'], c['guk'], plan_id, m))
+    for nid, nm in res['nir_months'].items():
+        conn.execute("DELETE FROM plan_nir_months WHERE nir_id=?", (nid,))
+        for m, h in nm.items():
+            if h:
+                conn.execute(
+                    "INSERT INTO plan_nir_months (nir_id, month, hours) VALUES (?,?,?)",
+                    (nid, m, h))
+    conn.commit()
+    bundle = _plan_bundle(conn, user['id'], plan['year'])
+    bundle['distribute_warnings'] = res['warnings']
+    conn.close()
+    return bundle
+
+
+@app.put("/api/plan/{plan_id}/cells")
+async def update_plan_cells(plan_id: int, request: Request):
+    user = _current_user(request)
+    data = await request.json()
+    conn = get_db()
+    plan = _own_plan(conn, user, plan_id)
+    for mr in (data.get('months') or []):
+        conn.execute(
+            "UPDATE plan_months SET hours_articles=?, hours_operatives=?, "
+            "hours_naryady=?, hours_guk=? WHERE plan_id=? AND month=?",
+            (int(mr.get('hours_articles') or 0), int(mr.get('hours_operatives') or 0),
+             int(mr.get('hours_naryady') or 0), int(mr.get('hours_guk') or 0),
+             plan_id, int(mr['month'])))
+    for nm in (data.get('nir_months') or []):
+        own = conn.execute(
+            "SELECT n.id FROM plan_nirs n WHERE n.id=? AND n.plan_id=?",
+            (int(nm['nir_id']), plan_id)).fetchone()
+        if not own:
+            continue
+        h = int(nm.get('hours') or 0)
+        conn.execute(
+            "INSERT INTO plan_nir_months (nir_id, month, hours) VALUES (?,?,?) "
+            "ON CONFLICT(nir_id, month) DO UPDATE SET hours=?",
+            (int(nm['nir_id']), int(nm['month']), h, h))
+    conn.commit()
+    bundle = _plan_bundle(conn, user['id'], plan['year'])
+    conn.close()
+    return bundle
+
+
+# — вечные оперативки —
+
+@app.get("/api/plan/eternal-ops")
+def list_eternal_ops(request: Request):
+    user = _current_user(request)
+    conn = get_db()
+    rows = [dict(r) for r in conn.execute(
+        "SELECT * FROM eternal_operatives WHERE user_id=? AND is_active=1 "
+        "ORDER BY sort_order, id", (user['id'],)).fetchall()]
+    conn.close()
+    return rows
+
+
+@app.post("/api/plan/eternal-ops")
+async def add_eternal_op(request: Request):
+    user = _current_user(request)
+    data = await request.json()
+    _require(data, 'name')
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO eternal_operatives (user_id, name, goal, tasks, result, doc, "
+        "hours_month, sort_order) VALUES (?,?,?,?,?,?,?,?)",
+        (user['id'], data['name'].strip(), data.get('goal') or '',
+         data.get('tasks') or '', data.get('result') or '', data.get('doc') or '',
+         int(data.get('hours_month') or 0), int(data.get('sort_order') or 0)))
+    oid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.commit()
+    conn.close()
+    return {"id": oid}
+
+
+@app.put("/api/plan/eternal-ops/{op_id}")
+async def update_eternal_op(op_id: int, request: Request):
+    user = _current_user(request)
+    data = await request.json()
+    conn = get_db()
+    row = conn.execute("SELECT * FROM eternal_operatives WHERE id=? AND user_id=?",
+                       (op_id, user['id'])).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "Оперативка не найдена")
+    conn.execute(
+        "UPDATE eternal_operatives SET name=?, goal=?, tasks=?, result=?, doc=?, "
+        "hours_month=? WHERE id=?",
+        ((data.get('name') or row['name']).strip(),
+         data.get('goal', row['goal']), data.get('tasks', row['tasks']),
+         data.get('result', row['result']), data.get('doc', row['doc']),
+         int(data.get('hours_month') if data.get('hours_month') is not None
+             else row['hours_month']), op_id))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+@app.delete("/api/plan/eternal-ops/{op_id}")
+def delete_eternal_op(op_id: int, request: Request):
+    user = _current_user(request)
+    conn = get_db()
+    conn.execute("UPDATE eternal_operatives SET is_active=0 WHERE id=? AND user_id=?",
+                 (op_id, user['id']))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+# — месячный план-отчёт —
+
+def _plan_month_data(conn, user: dict, year: int, month: int) -> dict:
+    """Данные месяца для конструктора/генерации: план, строка месяца, НИРы, вечные."""
+    plan = conn.execute("SELECT * FROM work_plans WHERE user_id=? AND year=?",
+                        (user['id'], year)).fetchone()
+    if not plan:
+        conn.close()
+        raise HTTPException(404, "Сначала создайте годовой план")
+    plan = dict(plan)
+    mrow = conn.execute("SELECT * FROM plan_months WHERE plan_id=? AND month=?",
+                        (plan['id'], month)).fetchone()
+    mrow = dict(mrow) if mrow else dict(month=month, fund_hours=0, vacation_days=0,
+                                        hours_articles=0, hours_operatives=0,
+                                        hours_naryady=0, hours_guk=0)
+    nirs = [dict(r) for r in conn.execute(
+        "SELECT * FROM plan_nirs WHERE plan_id=? ORDER BY sort_order, id",
+        (plan['id'],)).fetchall()]
+    nir_months = _plan_nir_months(conn, [n['id'] for n in nirs])
+    nir_rows = [{"nir_id": n['id'], "name": n['name'],
+                 "hours": nir_months[n['id']].get(month, 0)}
+                for n in nirs if nir_months[n['id']].get(month, 0) > 0]
+    eternal = [dict(r) for r in conn.execute(
+        "SELECT * FROM eternal_operatives WHERE user_id=? AND is_active=1 "
+        "ORDER BY sort_order, id", (user['id'],)).fetchall()]
+    eternal_total = sum(o['hours_month'] for o in eternal)
+    nir_sum = sum(r['hours'] for r in nir_rows)
+    norm = (nir_sum + mrow['hours_articles'] + mrow['hours_operatives']
+            + mrow['hours_naryady'] + mrow['hours_guk'])
+    # годовые итоги для шапки
+    all_months = [dict(r) for r in conn.execute(
+        "SELECT * FROM plan_months WHERE plan_id=?", (plan['id'],)).fetchall()]
+    nir_year = sum(sum(nm.values()) for nm in nir_months.values())
+    resource_year = nir_year + sum(r['hours_articles'] + r['hours_operatives']
+                                   + r['hours_naryady'] + r['hours_guk']
+                                   for r in all_months)
+    naryad_year = sum(r['hours_naryady'] for r in all_months)
+    return dict(plan=plan, mrow=mrow, nir_rows=nir_rows, eternal_ops=eternal,
+                eternal_total=eternal_total, norm=norm,
+                resource_year=resource_year, nr_year=resource_year - naryad_year)
+
+
+@app.get("/api/plan/report-data")
+def plan_report_data(year: int, month: int, request: Request):
+    user = _current_user(request)
+    conn = get_db()
+    d = _plan_month_data(conn, user, year, month)
+    articles = [dict(r) for r in conn.execute(
+        "SELECT id, title FROM articles WHERE user_id=? ORDER BY created_at DESC",
+        (user['id'],)).fetchall()]
+    software = [dict(r) for r in conn.execute(
+        "SELECT id, title FROM software WHERE user_id=? ORDER BY created_at DESC",
+        (user['id'],)).fetchall()]
+    conferences = [dict(r) for r in conn.execute(
+        "SELECT c.id, c.title FROM conferences c "
+        "JOIN monthly_reports mr ON c.report_id = mr.id WHERE mr.user_id=? "
+        "ORDER BY c.id DESC", (user['id'],)).fetchall()]
+    existing = conn.execute(
+        "SELECT * FROM plan_reports WHERE user_id=? AND year=? AND month=?",
+        (user['id'], year, month)).fetchone()
+    items = []
+    if existing:
+        items = [dict(r) for r in conn.execute(
+            "SELECT * FROM plan_report_items WHERE report_id=? ORDER BY id",
+            (existing['id'],)).fetchall()]
+    conn.close()
+    mrow = d['mrow']
+    return {
+        "norm": d['norm'], "nir_rows": d['nir_rows'],
+        "eternal_ops": d['eternal_ops'], "eternal_total": d['eternal_total'],
+        "budgets": {
+            "articles": mrow['hours_articles'],
+            "operatives": mrow['hours_operatives'],
+            "op_flex": max(0, mrow['hours_operatives'] - d['eternal_total']),
+            "naryady": mrow['hours_naryady'],
+            "guk": mrow['hours_guk'],
+        },
+        "candidates": {"articles": articles, "software": software,
+                       "conferences": conferences},
+        "existing": dict(existing) if existing else None,
+        "existing_items": items,
+    }
+
+
+@app.post("/api/plan/reports")
+async def create_plan_report(request: Request):
+    user = _current_user(request)
+    data = await request.json()
+    _require(data, 'year', 'month')
+    year, month = int(data['year']), int(data['month'])
+    conn = get_db()
+    d = _plan_month_data(conn, user, year, month)
+    plan, mrow = d['plan'], d['mrow']
+
+    items = data.get('items') or []
+    by_kind = {"article": [], "software": [], "conference": [], "operative": []}
+    for it in items:
+        kind = it.get('kind')
+        if kind in by_kind:
+            by_kind[kind].append(it)
+
+    fp = (user.get('first_patronymic') or '').strip()
+    fio_sign = ((fp[0] + '.') if fp else '') + (user.get('last_name') or '')
+    ctx = dict(
+        month=month, year=year,
+        fio_rp=plan['fio_genitive'] or ((user.get('last_name') or '') + ' ' + fp),
+        fio_sign=fio_sign,
+        position=user.get('position') or '',
+        appr_position=plan['approver_position'], appr_rank=plan['approver_rank'],
+        appr_name=plan['approver_name'],
+        resource_year=d['resource_year'], nr_year=d['nr_year'],
+        resource_month=d['norm'], nr_month=d['norm'] - mrow['hours_naryady'],
+        nirs=[(r['name'], r['hours']) for r in d['nir_rows']],
+        conferences=[(it.get('name', ''), int(it.get('hours') or 0))
+                     for it in by_kind['conference']],
+        articles=[(it.get('name', ''), int(it.get('hours') or 0))
+                  for it in by_kind['article']],
+        software=[(it.get('name', ''), int(it.get('hours') or 0))
+                  for it in by_kind['software']],
+        guk_hours=mrow['hours_guk'], naryad_hours=mrow['hours_naryady'],
+        eternal_ops=[dict(name=o['name'], goal=o['goal'], tasks=o['tasks'],
+                          result=o['result'], doc=o['doc'], hours=o['hours_month'])
+                     for o in d['eternal_ops']],
+        operatives=[dict(name=it.get('name', ''), goal=it.get('goal', ''),
+                         tasks=it.get('tasks', ''), result=it.get('result', ''),
+                         doc=it.get('doc', ''), hours=int(it.get('hours') or 0))
+                    for it in by_kind['operative']],
+    )
+    content = generate_plan_docx(ctx)
+    path = REPORTS_DIR / f"plan_{user['id']}_{year}_{month:02d}.docx"
+    path.write_bytes(content)
+
+    row = conn.execute(
+        "SELECT id FROM plan_reports WHERE user_id=? AND year=? AND month=?",
+        (user['id'], year, month)).fetchone()
+    if row:
+        rid = row['id']
+        conn.execute("UPDATE plan_reports SET docx_path=?, created_at=datetime('now') "
+                     "WHERE id=?", (str(path), rid))
+        conn.execute("DELETE FROM plan_report_items WHERE report_id=?", (rid,))
+    else:
+        conn.execute(
+            "INSERT INTO plan_reports (user_id, year, month, docx_path) VALUES (?,?,?,?)",
+            (user['id'], year, month, str(path)))
+        rid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    for it in items:
+        if it.get('kind') not in by_kind:
+            continue
+        conn.execute(
+            "INSERT INTO plan_report_items (report_id, kind, ref_id, name, goal, tasks, "
+            "result, hours) VALUES (?,?,?,?,?,?,?,?)",
+            (rid, it['kind'], it.get('ref_id'), it.get('name', ''),
+             it.get('goal', ''), it.get('tasks', ''), it.get('result', ''),
+             int(it.get('hours') or 0)))
+    conn.commit()
+    conn.close()
+    return {"id": rid}
+
+
+@app.get("/api/plan/reports")
+def list_plan_reports(request: Request):
+    user = _current_user(request)
+    conn = get_db()
+    rows = [dict(r) for r in conn.execute(
+        "SELECT id, year, month, created_at FROM plan_reports WHERE user_id=? "
+        "ORDER BY year DESC, month DESC", (user['id'],)).fetchall()]
+    conn.close()
+    return rows
+
+
+@app.get("/api/plan/reports/{report_id}/download")
+def download_plan_report(report_id: int, request: Request):
+    user = _current_user(request)
+    conn = get_db()
+    row = conn.execute("SELECT * FROM plan_reports WHERE id=?", (report_id,)).fetchone()
+    conn.close()
+    if not row or row['user_id'] != user['id']:
+        raise HTTPException(404, "Отчёт не найден")
+    p = Path(row['docx_path'] or '')
+    if not row['docx_path'] or not p.exists():
+        raise HTTPException(404, "Файл не найден на диске")
+    return FileResponse(
+        str(p),
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        filename=f"Личный_план_{MONTHS_RU[row['month']]}_{row['year']}.docx"
+    )
+
+
+@app.delete("/api/plan/reports/{report_id}")
+def delete_plan_report(report_id: int, request: Request):
+    user = _current_user(request)
+    conn = get_db()
+    row = conn.execute("SELECT * FROM plan_reports WHERE id=?", (report_id,)).fetchone()
+    if not row or row['user_id'] != user['id']:
+        conn.close()
+        raise HTTPException(404, "Отчёт не найден")
+    if row['docx_path']:
+        try:
+            Path(row['docx_path']).unlink(missing_ok=True)
+        except Exception:
+            pass
+    conn.execute("DELETE FROM plan_reports WHERE id=?", (report_id,))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
 # ── SUPERVISOR ────────────────────────────────────────────────────────────────
 
 @app.get("/api/supervisor/employees")
@@ -771,7 +1464,8 @@ def supervisor_employees(request: Request):
     _require_supervisor(request)
     conn = get_db()
     users = conn.execute(
-        "SELECT id, username, role, last_name, first_patronymic, position, unit FROM users WHERE role='employee' ORDER BY last_name"
+        "SELECT id, username, role, last_name, first_patronymic, position, unit FROM users "
+        "WHERE role='employee' AND active=1 ORDER BY last_name"
     ).fetchall()
     result = []
     for u in users:
@@ -821,6 +1515,25 @@ async def reject_report(report_id: int, request: Request):
     return {"ok": True}
 
 
+@app.post("/api/supervisor/reports/{report_id}/reopen")
+def supervisor_reopen_report(report_id: int, request: Request):
+    """Снять решение (утверждён/отклонён) и вернуть отчёт на проверку.
+    Используется, если начальник передумал или ошибся — только для текущего месяца."""
+    _require_supervisor(request)
+    conn = get_db()
+    row = conn.execute("SELECT year, month FROM monthly_reports WHERE id=?", (report_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "Отчёт не найден")
+    if not _is_current_period(row['year'], row['month']):
+        conn.close()
+        raise HTTPException(400, "Прошлые месяцы закрыты — решение по ним изменить нельзя")
+    conn.execute("UPDATE monthly_reports SET status='submitted', supervisor_comment='' WHERE id=?", (report_id,))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
 @app.delete("/api/supervisor/reports/{report_id}")
 def supervisor_delete_report(report_id: int, request: Request):
     _require_supervisor(request)
@@ -830,10 +1543,182 @@ def supervisor_delete_report(report_id: int, request: Request):
         p = Path(row['xlsx_path'])
         if p.exists():
             p.unlink()
+    # чистим осиротевшие вложения (подтверждения приказов, сертификаты докладов)
+    for r in conn.execute("SELECT confirmation_filename FROM report_orders WHERE report_id=?", (report_id,)).fetchall():
+        _delete_upload(r['confirmation_filename'])
+    for r in conn.execute("SELECT certificate_filename FROM conferences WHERE report_id=?", (report_id,)).fetchall():
+        _delete_upload(r['certificate_filename'])
     conn.execute("DELETE FROM monthly_reports WHERE id=?", (report_id,))
     conn.commit()
     conn.close()
     return {"ok": True}
+
+
+@app.get("/api/supervisor/deposits")
+def supervisor_deposits(request: Request):
+    """Общий архив РИД: все ПОДАННЫЕ (is_used=1) ПО и статьи всех сотрудников.
+    Неподанные чужие достижения не отдаются (приватность)."""
+    _require_supervisor(request)
+    conn = get_db()
+    users = {u['id']: dict(u) for u in conn.execute(
+        "SELECT id, username, last_name, first_patronymic, rank FROM users"
+    ).fetchall()}
+    out = []
+    for s in conn.execute(
+        "SELECT id, user_id, title, certificate_number, registration_date, used_month, used_year, docx_filename "
+        "FROM software WHERE is_used=1"
+    ).fetchall():
+        d = dict(s); d['kind'] = 'po'; d['owner'] = users.get(d['user_id'])
+        out.append(d)
+    for a in conn.execute(
+        "SELECT id, user_id, title, publication, article_type, used_month, used_year, docx_filename "
+        "FROM articles WHERE is_used=1"
+    ).fetchall():
+        d = dict(a); d['kind'] = 'article'; d['owner'] = users.get(d['user_id'])
+        out.append(d)
+    conn.close()
+    return out
+
+
+def _current_notifications(conn, user: dict) -> list:
+    """Активные (не скрытые) уведомления пользователя.
+    Начальник: отчёты, поданные на проверку. Сотрудник: возвращённые с замечанием
+    и утверждённые (за текущий месяц). Список самоочищается по смене статуса."""
+    notes = []
+    if user['role'] == 'supervisor':
+        rows = conn.execute("""
+            SELECT mr.id, mr.year, mr.month, mr.submitted_at,
+                   u.username, u.last_name, u.first_patronymic
+            FROM monthly_reports mr JOIN users u ON mr.user_id = u.id
+            WHERE mr.status = 'submitted'
+              AND NOT EXISTS (SELECT 1 FROM dismissed_notifications dn
+                              WHERE dn.user_id = ? AND dn.report_id = mr.id
+                                AND dn.kind = 'submitted')
+            ORDER BY mr.submitted_at DESC
+        """, (user['id'],)).fetchall()
+        for r in rows:
+            notes.append({
+                "kind": "submitted", "report_id": r['id'],
+                "year": r['year'], "month": r['month'], "when": r['submitted_at'],
+                "username": r['username'], "last_name": r['last_name'],
+                "first_patronymic": r['first_patronymic'],
+            })
+    else:
+        cy, cm = _current_period()
+        rows = conn.execute("""
+            SELECT id, year, month, status, supervisor_comment, submitted_at
+            FROM monthly_reports
+            WHERE user_id = ? AND (status = 'rejected' OR (status = 'approved' AND year = ? AND month = ?))
+              AND NOT EXISTS (SELECT 1 FROM dismissed_notifications dn
+                              WHERE dn.user_id = monthly_reports.user_id
+                                AND dn.report_id = monthly_reports.id
+                                AND dn.kind = monthly_reports.status)
+            ORDER BY submitted_at DESC
+        """, (user['id'], cy, cm)).fetchall()
+        for r in rows:
+            notes.append({
+                "kind": r['status'], "report_id": r['id'],
+                "year": r['year'], "month": r['month'], "when": r['submitted_at'],
+                "comment": r['supervisor_comment'] or '',
+            })
+    return notes
+
+
+@app.get("/api/notifications")
+def get_notifications(request: Request):
+    user = _current_user(request)
+    conn = get_db()
+    notes = _current_notifications(conn, user)
+    conn.close()
+    return notes
+
+
+@app.post("/api/notifications/dismiss")
+async def dismiss_notification(request: Request):
+    """Скрыть уведомление навсегда (по отчёту и виду). Пустой report_id → закрыть все."""
+    user = _current_user(request)
+    data = await request.json()
+    conn = get_db()
+    if data.get('report_id'):
+        conn.execute(
+            "INSERT OR IGNORE INTO dismissed_notifications (user_id, report_id, kind) "
+            "VALUES (?,?,?)",
+            (user['id'], int(data['report_id']), data.get('kind') or ''))
+    else:
+        # закрыть все текущие уведомления пользователя
+        for n in _current_notifications(conn, user):
+            conn.execute(
+                "INSERT OR IGNORE INTO dismissed_notifications (user_id, report_id, kind) "
+                "VALUES (?,?,?)", (user['id'], n['report_id'], n['kind']))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+@app.get("/api/dashboard")
+def dashboard(request: Request, year: int, month: int):
+    """Агрегаты по подразделению за выбранный месяц (для начальника).
+    Снимки прошлых месяцев берутся прямо из monthly_reports."""
+    _require_supervisor(request)
+    conn = get_db()
+    employees = conn.execute(
+        "SELECT id, username, last_name, first_patronymic, position, rank "
+        "FROM users WHERE role='employee' AND active=1 ORDER BY last_name"
+    ).fetchall()
+    total = len(employees)
+
+    st = {'submitted': 0, 'approved': 0, 'rejected': 0}   # submitted = ждут проверки
+    submitted_count = 0
+    ranking = []
+    rids = []
+
+    for u in employees:
+        rep = conn.execute(
+            "SELECT id, total_points, status FROM monthly_reports "
+            "WHERE user_id=? AND year=? AND month=?", (u['id'], year, month)
+        ).fetchone()
+        entry = dict(u)
+        if rep:
+            submitted_count += 1
+            if rep['status'] in st:
+                st[rep['status']] += 1
+            rids.append(rep['id'])
+            entry.update(status=rep['status'], pts=rep['total_points'] or 0, report_id=rep['id'])
+        else:
+            entry.update(status='none', pts=0, report_id=None)
+        ranking.append(entry)
+
+    # Счётчики достижений — БЕЗ задвоения соавторства: одна статья/ПО/приказ
+    # нескольких сотрудников академии считается один раз (по естественному ключу).
+    counts = {'software': 0, 'articles': 0, 'conferences': 0, 'orders': 0}
+    if rids:
+        ph = ','.join('?' * len(rids))
+        counts['software'] = conn.execute(
+            f"SELECT COUNT(DISTINCT s.certificate_number) FROM report_software rs "
+            f"JOIN software s ON rs.software_id=s.id WHERE rs.report_id IN ({ph})", rids).fetchone()[0]
+        counts['articles'] = conn.execute(
+            f"SELECT COUNT(DISTINCT lower(trim(a.title))) FROM report_articles ra "
+            f"JOIN articles a ON ra.article_id=a.id WHERE ra.report_id IN ({ph})", rids).fetchone()[0]
+        counts['orders'] = conn.execute(
+            f"SELECT COUNT(DISTINCT order_id) FROM report_orders WHERE report_id IN ({ph})", rids).fetchone()[0]
+        counts['conferences'] = conn.execute(
+            f"SELECT COUNT(*) FROM conferences WHERE report_id IN ({ph})", rids).fetchone()[0]
+
+    conn.close()
+    ranking.sort(key=lambda x: x['pts'], reverse=True)
+    return {
+        'period': {'year': year, 'month': month},
+        'statuses': {
+            'total': total,
+            'submitted_count': submitted_count,
+            'not_submitted': total - submitted_count,
+            'pending': st['submitted'],
+            'approved': st['approved'],
+            'rejected': st['rejected'],
+        },
+        'counts': counts,
+        'ranking': ranking,
+    }
 
 
 # ── STATIC ────────────────────────────────────────────────────────────────────

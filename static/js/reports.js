@@ -8,31 +8,33 @@ async function submitReport() {
     return;
   }
 
-  const total = calcTotal();
-  if (total > SCORE_CAP) {
-    if (!confirm(`Суммарный балл (${total}) превышает лимит ${SCORE_CAP}. Сверхлимитные баллы не учитываются. Продолжить?`)) return;
-  }
-
+  // Лимит 30 не блокирует подачу: в .xlsx уходит фактическая сумма,
+  // превышение показывается только красной шкалой в черновике.
   const orders = state.addedItems.filter(i => i.type === 'order');
   const softwareItems = state.addedItems.filter(i => i.type === 'software');
   const articles = state.addedItems.filter(i => i.type === 'article');
   const conferences = state.addedItems.filter(i => i.type === 'conference');
 
-  // Save software to DB
+  // Save software to DB. Позиции из Картотеки РИД уже есть в БД (data.id) —
+  // не пересоздаём, используем существующую запись; новые (введённые прямо
+  // в отчёте) — создаём здесь.
   const swIds = [];
   for (const sw of softwareItems) {
     try {
-      const r = await api('POST', '/software', sw.data);
-      swIds.push({ id: r.id, points_claimed: sw.data.points_claimed });
+      let id = sw.data.id;
+      // нет id (новое) ИЛИ правили при доработке (_dirty) → (пере)сохраняем, upsert по свидетельству
+      if (!id || sw._dirty) { const r = await api('POST', '/software', sw.data); id = r.id; }
+      swIds.push({ id, points_claimed: sw.data.points_claimed });
     } catch(e) { showMsg('submit-msg', e.message, 'err'); return; }
   }
 
-  // Save articles to DB
+  // Save articles to DB (та же логика: депозит → по id, иначе создаём/обновляем)
   const artList = [];
   for (const a of articles) {
     try {
-      const r = await api('POST', '/articles', a.data);
-      artList.push({ id: r.id, points_taken: a.data.points_taken || 0 });
+      let id = a.data.id;
+      if (!id || a._dirty) { const r = await api('POST', '/articles', { ...a.data, id }); id = r.id; }
+      artList.push({ id, points_taken: a.data.points_taken || 0 });
     } catch(e) { showMsg('submit-msg', e.message, 'err'); return; }
   }
 
@@ -51,6 +53,8 @@ async function submitReport() {
     showMsg('submit-msg', `Отчёт сформирован! Итого: ${result.total_points} баллов`);
     state.addedItems = [];
     state.confirmations = {};
+    state.rework = null;
+    renderReworkBanner();
     closePanel();
     updateScore();
     loadActiveOrders();
@@ -58,24 +62,6 @@ async function submitReport() {
 }
 
 // ─── ORDERS REGISTRY ───────────────────────────────────────────────────────
-function toggleOrdAddArea() {
-  const area = document.getElementById('ord-add-area');
-  area.style.display = area.style.display === 'none' ? '' : 'none';
-  if (area.style.display !== 'none') ordParseMode('upload');
-}
-
-function ordParseMode(mode) {
-  if (mode === 'manual') {
-    document.getElementById('ord-add-area').style.display = 'none';
-    showOrderModal();
-    return;
-  }
-  const uz = document.getElementById('ord-upload-zone');
-  if (uz) uz.style.display = '';
-  document.getElementById('ord-btn-upload').classList.toggle('active', mode === 'upload');
-  document.getElementById('ord-btn-manual').classList.toggle('active', mode === 'manual');
-}
-
 async function parseOrderFile(input) {
   if (!input.files[0]) return;
   const fd = new FormData();
@@ -86,7 +72,7 @@ async function parseOrderFile(input) {
     if (pr) {
       pr.style.display = '';
       pr.className = 'parse-result';
-      pr.innerHTML = `<div class="prt">✓ Распознано</div>
+      pr.innerHTML = `<div class="prt">${ic('check')} Распознано</div>
         <div class="parse-field"><span class="parse-key">Номер:</span><span>${d.number || '—'}</span></div>
         <div class="parse-field"><span class="parse-key">Тема:</span><span>${d.title || '—'}</span></div>
         <div class="parse-field"><span class="parse-key">Уровень:</span><span>${d.level === 'academy' ? 'ВАС' : 'Вышестоящий'}</span></div>
@@ -98,30 +84,42 @@ async function parseOrderFile(input) {
 
 async function loadOrders() {
   const orders = await api('GET', '/orders').catch(() => []);
-  const tbody = document.getElementById('orders-table-body');
-  if (!orders.length) { tbody.innerHTML = '<tr><td colspan="7" class="empty-state">Нет приказов</td></tr>'; return; }
-  tbody.innerHTML = orders.map(o => {
+  const body = document.getElementById('orders-table-body');
+  const countEl = document.getElementById('orders-count');
+  if (countEl) countEl.textContent = `${orders.length} ${_plural(orders.length, 'запись', 'записи', 'записей')}`;
+  if (!orders.length) { body.innerHTML = '<div class="empty-state">Нет приказов</div>'; return; }
+  body.innerHTML = orders.map(o => {
     const lvl = o.level === 'academy'
       ? '<span class="badge badge-academy">ВАС</span>'
       : '<span class="badge badge-higher">Вышестоящий</span>';
-    const dl = o.deadline_type === 'monthly' ? 'Ежемесячно' : o.deadline_date;
+    const term = o.deadline_type === 'monthly' ? 'Ежемес.' : (o.deadline_date || '—');
     const expired = o.expired;
-    const statusDot = expired
-      ? '<span class="status-dot dot-gray"></span><span style="color:#aaa">Истёк</span>'
-      : (o.is_active ? '<span class="status-dot dot-green"></span>Активен' : '<span class="status-dot dot-amber"></span>Отключён');
-    return `<tr style="${expired ? 'opacity:.5' : ''}">
-      <td><b>№${o.number}</b></td>
-      <td>${o.title}</td>
-      <td style="color:#555;font-size:12px">${o.executor || '—'}</td>
-      <td>${lvl}</td>
-      <td>${dl}</td>
-      <td>${statusDot}</td>
-      <td style="white-space:nowrap">
-        <button class="btn btn-secondary btn-sm" onclick="editOrder(${JSON.stringify(o).replace(/"/g,'&quot;')})">✏</button>
-        <button class="btn btn-danger btn-sm" onclick="deleteOrder(${o.id})">✕</button>
-      </td>
-    </tr>`;
+    const status = expired
+      ? '<span class="ord-status ord-status-off"><span class="status-dot dot-gray"></span>Истёк</span>'
+      : (o.is_active ? '<span class="ord-status ord-status-on"><span class="status-dot dot-green"></span>Активен</span>'
+                     : '<span class="ord-status ord-status-off"><span class="status-dot dot-amber"></span>Отключён</span>');
+    return `<div class="ord-row"${expired ? ' style="opacity:.55"' : ''}>
+      <div style="width:120px">
+        <div class="ord-no">№${o.number}</div>
+        <div class="ord-date">${o.order_date || ''}</div>
+      </div>
+      <div style="flex:1;padding-right:14px" class="ord-title">${o.title}</div>
+      <div style="width:120px">${lvl}</div>
+      <div style="width:96px;text-align:right;font-size:12px;color:var(--text-3)">${term}</div>
+      <div style="width:120px;display:flex;justify-content:flex-end">${status}</div>
+      <div style="width:70px;display:flex;justify-content:flex-end;gap:4px">
+        <button class="btn btn-secondary btn-icon" onclick="editOrder(${JSON.stringify(o).replace(/"/g,'&quot;')})" title="Изменить">${ic('edit')}</button>
+        <button class="btn btn-danger btn-icon" onclick="deleteOrder(${o.id})" title="Удалить">${ic('trash')}</button>
+      </div>
+    </div>`;
   }).join('');
+}
+
+function _plural(n, one, few, many) {
+  const m10 = n % 10, m100 = n % 100;
+  if (m10 === 1 && m100 !== 11) return one;
+  if (m10 >= 2 && m10 <= 4 && (m100 < 10 || m100 >= 20)) return few;
+  return many;
 }
 
 function showOrderModal(o) {
@@ -166,8 +164,6 @@ async function saveOrder() {
     if (state.editingOrderId) await api('PUT', '/orders/' + state.editingOrderId, data);
     else await api('POST', '/orders', data);
     closeOrderModal();
-    const area = document.getElementById('ord-add-area');
-    if (area) area.style.display = 'none';
     loadOrders();
     loadActiveOrders();
   } catch(e) {
@@ -183,13 +179,90 @@ async function deleteOrder(id) {
   loadActiveOrders();
 }
 
+// ─── ОТЗЫВ / ДОРАБОТКА ОТЧЁТА ───────────────────────────────────────────────
+function _isCurrentPeriod(year, month) {
+  const now = new Date();
+  return Number(year) === now.getFullYear() && Number(month) === now.getMonth() + 1;
+}
+
+async function reopenReport(id) {
+  if (!confirm('Снять поданную версию и вернуть достижения в черновик «Подать отчёт»? После правок сформируйте отчёт заново.')) return;
+  let data;
+  try {
+    data = await api('POST', `/reports/${id}/reopen`);
+  } catch (e) { alert(e.message); return; }
+
+  // восстановить период и черновик
+  const ms = document.getElementById('report-month');
+  const ys = document.getElementById('report-year');
+  if (ms) ms.value = data.month;
+  if (ys) ys.value = data.year;
+  state.addedItems = [];
+  state.confirmations = {};
+
+  (data.orders || []).forEach(o => {
+    const pts = o.level === 'academy' ? WEIGHTS.order_academy : WEIGHTS.order_higher;
+    addItem('order', ic('order'), `Задание ${o.level === 'academy' ? 'ВАС' : 'вышестоящего'} · №${o.number}`, o.title, pts,
+      { id: o.id, level: o.level, number: o.number, title: o.title });
+    if (o.confirmation_filename) state.confirmations[o.id] = o.confirmation_filename;
+  });
+  (data.software || []).forEach(s => addItem('software', ic('software'), s.title, `№${s.certificate_number} · ПО (п.20)`, s.points_taken,
+    { id: s.id, title: s.title, certificate_number: s.certificate_number, registration_date: s.registration_date,
+      output_data: s.output_data, docx_filename: s.docx_filename, authors: s.authors || [], points_claimed: s.points_taken }));
+  (data.articles || []).forEach(a => addItem('article', ic('article'), a.title,
+    (ART_LABELS[a.article_type] || '') + (a.publication ? ' · ' + a.publication : ''), a.points_taken || 0,
+    { id: a.id, title: a.title, publication: a.publication, article_type: a.article_type,
+      author_list: a.authors || [], points_taken: a.points_taken || 0 }));
+  (data.conferences || []).forEach(c => addItem('conference', ic('conference'), c.title || 'Доклад на конференции', 'п.24', c.points_taken,
+    { title: c.title, certificate_filename: c.certificate_filename, points_taken: c.points_taken }));
+
+  // режим доработки — для баннера-подсказки и акцента на кнопке «Исправить»
+  state.rework = { period: `${MONTHS[data.month]} ${data.year}`, comment: data.supervisor_comment || '' };
+
+  nav('submit');
+  renderReworkBanner();
+  updateScore();
+}
+
+function renderReworkBanner() {
+  const el = document.getElementById('rework-banner');
+  if (!el) return;
+  if (!state.rework) { el.style.display = 'none'; el.innerHTML = ''; return; }
+  const { period, comment } = state.rework;
+  el.style.display = 'block';
+  el.innerHTML = `
+    <div class="rework-banner-head">
+      <span class="rework-banner-ic">${ic('reopen', 18)}</span>
+      <div>
+        <div class="rework-banner-title">Доработка отчёта за ${period}</div>
+        ${comment ? `<div class="rework-banner-comment">Замечание начальника: «${comment}»</div>` : ''}
+      </div>
+    </div>
+    <div class="rework-banner-steps">
+      <span class="rework-step"><span class="rework-step-n">1</span> Найдите достижение в списке <b>«В этом отчёте»</b> справа</span>
+      <span class="rework-step"><span class="rework-step-n">2</span> Нажмите у него кнопку <b class="rework-fix-ref">${ic('edit')} Исправить</b></span>
+      <span class="rework-step"><span class="rework-step-n">3</span> Внесите правки и нажмите <b>«Сформировать отчёт»</b></span>
+    </div>`;
+}
+
 // ─── ARCHIVE ───────────────────────────────────────────────────────────────
 async function clearArchive() {
-  if (!confirm('Удалить все отчёты из архива?')) return;
+  if (!confirm('Удалить всю историю отчётов? Приказы, ПО и статьи останутся, использованные в отчётах ПО/статьи вернутся в картотеку.')) return;
   await api('DELETE', '/reports/all');
   state.archiveReports = [];
   document.getElementById('archive-chips').innerHTML = '';
-  document.getElementById('archive-detail').innerHTML = '<div class="empty-state">Архив очищен</div>';
+  document.getElementById('archive-detail').innerHTML = '<div class="empty-state">История отчётов очищена</div>';
+  toast(ic('check') + ' История отчётов очищена');
+}
+
+async function clearOrders() {
+  if (!confirm('Удалить все приказы из реестра? Ссылки на них в поданных отчётах также будут сняты.')) return;
+  try {
+    await api('DELETE', '/orders/all');
+    toast(ic('check') + ' Реестр приказов очищен');
+    loadOrders();
+    if (typeof loadActiveOrders === 'function') loadActiveOrders();
+  } catch (e) { alert(e.message); }
 }
 
 async function loadArchive() {
@@ -208,7 +281,7 @@ function renderArchiveChips() {
   if (state.archiveReports.length) document.getElementById('chip-' + state.archiveReports[0].id).classList.add('active');
 }
 
-const _STATUS_LABEL = { submitted: 'На проверке', approved: 'Утверждён ✓', rejected: 'Отклонён' };
+const _STATUS_LABEL = { submitted: 'На проверке', approved: 'Утверждён', rejected: 'Отклонён' };
 const _STATUS_CLASS = { submitted: 'badge-submitted', approved: 'badge-approved', rejected: 'badge-rejected' };
 
 function _statusBadge(status) {
@@ -229,13 +302,13 @@ async function showArchiveDetail(id) {
     const pts = o.level === 'academy' ? WEIGHTS.order_academy : WEIGHTS.order_higher;
     const cfn = o.confirmation_filename;
     const fileBtn = cfn
-      ? `<button class="file-preview-btn" onclick="previewDocx('${cfn}','Подтверждайка — №${o.number}')">📎 подтверждайка</button>`
+      ? `<button class="file-preview-btn" onclick="previewDocx('${cfn}','Подтверждайка — №${o.number}')">${ic('paperclip')} подтверждайка</button>`
       : '';
     return `<div class="score-item"><div><div>${o.level === 'academy' ? 'Задание ВАС (п.30.2)' : 'Задание вышестоящего (п.30.1)'} · №${o.number}</div><div class="score-desc">${o.title}</div>${fileBtn}</div><div class="score-pts">${pts} б.</div></div>`;
   }).join('');
   const swRows = (r.software || []).map(s => {
     const fileBtn = s.docx_filename
-      ? `<button class="file-preview-btn" onclick="previewDocx('${s.docx_filename}','Ведомость — ${s.title.replace(/'/g,"\\'")}')">📄 ведомость</button>`
+      ? `<button class="file-preview-btn" onclick="previewDocx('${s.docx_filename}','Ведомость — ${s.title.replace(/'/g,"\\'")}')">${ic('doc')} ведомость</button>`
       : '';
     return `<div class="score-item"><div><div>ПО: ${s.title}</div><div class="score-desc">№${s.certificate_number}</div>${fileBtn}</div><div class="score-pts">${s.points_taken} б.</div></div>`;
   }).join('');
@@ -245,52 +318,120 @@ async function showArchiveDetail(id) {
   }).join('');
   const confRows = (r.conferences || []).map(c => {
     const fileBtn = c.certificate_filename
-      ? `<button class="file-preview-btn" onclick="previewDocx('${c.certificate_filename}','Сертификат — ${(c.title||'').replace(/'/g,"\\'")}')">📎 сертификат</button>`
+      ? `<button class="file-preview-btn" onclick="previewDocx('${c.certificate_filename}','Сертификат — ${(c.title||'').replace(/'/g,"\\'")}')">${ic('paperclip')} сертификат</button>`
       : '';
     return `<div class="score-item"><div><div>${c.title || 'Доклад на конференции'}</div><div class="score-desc">п.24 · Доклад на конференции</div>${fileBtn}</div><div class="score-pts">${c.points_taken} б.</div></div>`;
   }).join('');
 
-  const supervisorComment = r.supervisor_comment
-    ? `<div class="supervisor-comment">Комментарий: ${r.supervisor_comment}</div>` : '';
+  const cnt = (r.orders || []).length + (r.software || []).length + (r.articles || []).length + (r.conferences || []).length;
+  const subDate = (r.submitted_at || '').slice(0, 10).split('-').reverse().join('.');
+
+  const rejectBanner = (r.status === 'rejected' && r.supervisor_comment)
+    ? `<div style="padding:14px 16px 0"><div class="review-reject-banner"><b>Возвращён с замечанием:</b> ${r.supervisor_comment}</div></div>` : '';
 
   const supervisorActions = isSupervisor ? `
-    <div class="supervisor-actions">
-      <button class="btn btn-primary btn-sm" onclick="approveReport(${id})">✓ Утвердить</button>
-      <button class="btn btn-danger btn-sm" onclick="openRejectModal(${id})">✕ Отклонить</button>
-      <button class="btn btn-secondary btn-sm" onclick="supervisorDeleteReport(${id})">🗑 Удалить</button>
-    </div>` : '';
+    <div style="padding:12px 16px;border-bottom:1px solid var(--border)"><div class="supervisor-actions" style="margin-top:0;padding-top:0;border-top:none">
+      <button class="btn btn-primary btn-sm" onclick="approveReport(${id})">${ic('check')} Утвердить</button>
+      <button class="btn btn-danger btn-sm" onclick="openRejectModal(${id})">${ic('close')} Отклонить</button>
+      <button class="btn btn-secondary btn-sm" onclick="supervisorDeleteReport(${id})">${ic('trash')} Удалить</button>
+    </div></div>` : '';
 
   el.innerHTML = `<div class="card">
-    <div class="card-header">
-      <div class="card-title">${MONTHS[r.month]} ${r.year} ${_statusBadge(r.status)}</div>
-      <a href="/api/reports/${id}/export" class="btn btn-secondary btn-sm">⬇ .xlsx</a>
+    <div class="card-header" style="align-items:flex-start">
+      <div>
+        <div style="font-family:var(--serif);font-size:19px;color:var(--text-1);font-weight:600;display:flex;align-items:center;gap:10px">${MONTHS[r.month]} ${r.year} ${_statusBadge(r.status)}</div>
+        <div style="font-size:11.5px;color:var(--text-4);margin-top:5px;font-family:var(--mono)">${subDate ? 'подан ' + subDate + ' · ' : ''}${cnt} ${_plural(cnt, 'достижение', 'достижения', 'достижений')}</div>
+      </div>
+      <div style="display:flex;gap:8px;flex-shrink:0">
+        ${(!isSupervisor && _isCurrentPeriod(r.year, r.month) && r.status === 'rejected')
+          ? `<button class="btn btn-primary btn-sm" onclick="reopenReport(${id})">${ic('edit')} Доработать и отправить заново</button>` : ''}
+        ${(!isSupervisor && _isCurrentPeriod(r.year, r.month) && r.status === 'submitted')
+          ? `<button class="btn btn-secondary btn-sm" onclick="reopenReport(${id})">${ic('reopen')} Отозвать на доработку</button>` : ''}
+        <a href="/api/reports/${id}/export" class="btn btn-secondary btn-sm">${ic('download')} Скачать .xlsx</a>
+      </div>
     </div>
-    ${supervisorComment ? `<div style="padding:8px 16px;border-bottom:1px solid #f0f0f0">${supervisorComment}</div>` : ''}
-    ${supervisorActions ? `<div style="padding:8px 16px;border-bottom:1px solid #f0f0f0">${supervisorActions}</div>` : ''}
+    ${rejectBanner}
+    ${supervisorActions}
     <div class="card-body" style="padding:0 16px">
       ${orderRows}${swRows}${artRows}${confRows}
       ${!orderRows && !swRows && !artRows && !confRows ? '<div class="empty-state">Нет данных</div>' : ''}
     </div>
-    <div class="total-row"><span class="total-label">Итого баллов</span><span class="total-pts">${r.total_points}</span></div>
+    <div class="total-row"><span class="total-label">Итого баллов</span><span class="total-pts">${round1(Math.min(r.total_points || 0, SCORE_CAP))}<span style="color:var(--text-5)"> / 30</span></span></div>
   </div>`;
 }
 
 // ─── STATS ─────────────────────────────────────────────────────────────────
 async function loadStats() {
+  const body = document.getElementById('stats-body');
   const reports = await api('GET', '/reports').catch(() => []);
-  const totalPts = reports.reduce((a, r) => a + (r.total_points || 0), 0);
-  document.getElementById('stats-cards').innerHTML = `
-    <div class="metric"><div class="metric-label">Отчётов всего</div><div class="metric-value">${reports.length}</div></div>
-    <div class="metric"><div class="metric-label">Последний месяц</div><div class="metric-value">${reports[0] ? reports[0].total_points : 0}</div><div class="metric-sub">баллов</div></div>
-    <div class="metric"><div class="metric-label">За всё время</div><div class="metric-value">${totalPts.toFixed(1)}</div><div class="metric-sub">баллов</div></div>`;
-  const tbody = document.getElementById('stats-table');
-  if (!reports.length) { tbody.innerHTML = '<tr><td colspan="6" class="empty-state">Нет данных</td></tr>'; return; }
-  const details = await Promise.all(reports.map(r => api('GET', '/reports/' + r.id).catch(() => null)));
-  tbody.innerHTML = details.map((d, i) => {
-    if (!d) return '';
-    const r = reports[i];
-    return `<tr><td>${MONTHS[r.month]} ${r.year}</td><td>${d.orders.length}</td><td>${d.software.length}</td><td>${d.articles.length}</td><td><b>${r.total_points}</b></td><td><a href="/api/reports/${r.id}/export" class="btn btn-secondary btn-sm">⬇ xlsx</a></td></tr>`;
+  if (!reports.length) {
+    body.innerHTML = '<div class="card"><div class="card-body"><div class="empty-state">Нет отчётов за выбранный год</div></div></div>';
+    return;
+  }
+
+  // current year only
+  const year = Math.max(...reports.map(r => r.year));
+  const yr = reports.filter(r => r.year === year).slice().sort((a, b) => a.month - b.month);
+  const capped = v => Math.min(v, SCORE_CAP);
+
+  const sum = yr.reduce((a, r) => a + capped(r.total_points || 0), 0);
+  const avg = yr.length ? sum / yr.length : 0;
+  const best = yr.reduce((m, r) => (capped(r.total_points || 0) > capped(m.total_points || 0) ? r : m), yr[0]);
+
+  document.querySelector('#screen-stats .topbar-eyebrow').textContent = `Динамика баллов · ${year}`;
+
+  // bars
+  const bars = yr.map(r => {
+    const v = round1(r.total_points || 0);
+    const h = Math.max(4, capped(v) / SCORE_CAP * 100);
+    const atCap = v >= SCORE_CAP;
+    return `<div class="stat-bar">
+      <div class="stat-bar-val">${v}</div>
+      <div class="stat-bar-fill" style="height:${h}%;background:${atCap ? 'var(--gold)' : '#3E4654'}"></div>
+      <div class="stat-bar-month">${MONTHS[r.month].slice(0, 3).toLowerCase()}</div>
+    </div>`;
   }).join('');
+
+  // table (with per-report detail counts)
+  const details = await Promise.all(yr.map(r => api('GET', '/reports/' + r.id).catch(() => null)));
+  const rows = yr.map((r, i) => {
+    const d = details[i] || { orders: [], software: [], articles: [], conferences: [] };
+    const cnt = d.orders.length + d.software.length + d.articles.length + (d.conferences ? d.conferences.length : 0);
+    const v = round1(r.total_points || 0);
+    return `<div class="stat-row">
+      <div style="flex:1;font-size:13.5px;color:var(--text-2)">${MONTHS[r.month]} ${r.year}</div>
+      <div style="width:110px;text-align:right;font-family:var(--mono);font-size:13.5px;color:var(--text-1)">${v}<span style="color:var(--text-5)">/30</span></div>
+      <div style="width:140px;text-align:right;font-size:13px;color:var(--text-3)">${cnt} ${_plural(cnt, 'достижение', 'достижения', 'достижений')}</div>
+      <div style="width:150px;display:flex;justify-content:flex-end">${_statusBadge(r.status)}</div>
+    </div>`;
+  }).join('');
+
+  body.innerHTML = `
+    <div class="metric-grid">
+      <div class="metric"><div class="metric-label">Сумма за год</div><div class="metric-value">${round1(sum)}</div></div>
+      <div class="metric"><div class="metric-label">Среднее / мес.</div><div class="metric-value" style="color:var(--text-1)">${avg.toFixed(1)}</div></div>
+      <div class="metric"><div class="metric-label">Лучший месяц</div>
+        <div style="font-family:var(--serif);font-size:20px;color:var(--text-1);font-weight:600;margin-top:11px">${MONTHS[best.month]} · <span style="font-family:var(--mono);color:var(--gold-dim)">${round1(best.total_points || 0)}</span></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">Баллы по месяцам</div>
+        <div style="font-family:var(--mono);font-size:11px;color:var(--text-4)">— — — лимит 30</div>
+      </div>
+      <div class="card-body">
+        <div class="stat-chart"><div class="stat-chart-limit"></div>${bars}</div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="stat-thead">
+        <div style="flex:1">Месяц</div>
+        <div style="width:110px;text-align:right">Баллы</div>
+        <div style="width:140px;text-align:right">Достижений</div>
+        <div style="width:150px;text-align:right">Статус</div>
+      </div>
+      ${rows}
+    </div>`;
 }
 
 // ─── PROFILE ───────────────────────────────────────────────────────────────
@@ -301,6 +442,20 @@ async function loadProfile() {
   document.getElementById('p-pos').value = p.position || '';
   document.getElementById('p-unit').value = p.unit || '';
   document.getElementById('p-rank').value = p.rank || '';
+  _renderProfileHero(p);
+}
+
+function _renderProfileHero(p) {
+  const u = state.currentUser || {};
+  const name = [p.last_name, p.first_patronymic].filter(Boolean).join(' ') || u.username || '—';
+  const role = u.role === 'supervisor' ? 'Начальник' : 'Сотрудник';
+  const sub = [p.rank, role].filter(Boolean).join(' · ');
+  const av = document.getElementById('profile-avatar');
+  const nm = document.getElementById('profile-hero-name');
+  const sb = document.getElementById('profile-hero-sub');
+  if (av) av.textContent = _initials({ last_name: p.last_name, first_patronymic: p.first_patronymic, username: u.username });
+  if (nm) nm.textContent = name;
+  if (sb) sb.textContent = sub;
 }
 
 async function saveProfile() {
