@@ -1,7 +1,8 @@
 import sqlite3
+import os
 from pathlib import Path
 
-DB_PATH = Path(__file__).parent / "data.db"
+DB_PATH = Path(os.environ.get("VAS_DB_PATH", Path(__file__).parent / "data.db"))
 
 
 def get_db():
@@ -24,8 +25,44 @@ def init_db():
             position TEXT DEFAULT '',
             rank TEXT DEFAULT '',
             unit TEXT DEFAULT '',
+            active INTEGER DEFAULT 1,
+            password_hash TEXT DEFAULT '',
+            must_change_password INTEGER DEFAULT 1,
+            failed_login_attempts INTEGER DEFAULT 0,
+            locked_until TEXT,
+            last_login_at TEXT,
+            password_changed_at TEXT,
             created_at TEXT DEFAULT (datetime('now'))
         );
+
+        CREATE TABLE IF NOT EXISTS user_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            token_hash TEXT UNIQUE NOT NULL,
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            created_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            ip_address TEXT DEFAULT '',
+            user_agent TEXT DEFAULT '',
+            revoked_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS audit_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER REFERENCES users(id),
+            event_type TEXT NOT NULL,
+            target_type TEXT DEFAULT '',
+            target_id TEXT DEFAULT '',
+            details TEXT DEFAULT '{}',
+            ip_address TEXT DEFAULT '',
+            user_agent TEXT DEFAULT '',
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_sessions_token ON user_sessions(token_hash);
+        CREATE INDEX IF NOT EXISTS idx_sessions_user ON user_sessions(user_id, revoked_at);
+        CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_events(created_at);
+        CREATE INDEX IF NOT EXISTS idx_audit_ip_type ON audit_events(ip_address, event_type, created_at);
 
         CREATE TABLE IF NOT EXISTS orders (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -261,9 +298,18 @@ def init_db():
 
     # users: add active (мягкое удаление — данные остаются в архиве)
     u_cols = [r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
-    if 'active' not in u_cols:
-        conn.execute("ALTER TABLE users ADD COLUMN active INTEGER DEFAULT 1")
-        conn.commit()
+    for col, defn in [
+        ('active', 'INTEGER DEFAULT 1'),
+        ('password_hash', "TEXT DEFAULT ''"),
+        ('must_change_password', 'INTEGER DEFAULT 1'),
+        ('failed_login_attempts', 'INTEGER DEFAULT 0'),
+        ('locked_until', 'TEXT'),
+        ('last_login_at', 'TEXT'),
+        ('password_changed_at', 'TEXT'),
+    ]:
+        if col not in u_cols:
+            conn.execute(f"ALTER TABLE users ADD COLUMN {col} {defn}")
+            conn.commit()
 
     # orders: add user_id, executor
     cols = [r[1] for r in conn.execute("PRAGMA table_info(orders)").fetchall()]

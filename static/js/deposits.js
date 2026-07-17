@@ -24,7 +24,7 @@ function _depFromArticle(a) {
 }
 
 async function loadDeposits() {
-  if ((state.currentUser || {}).role === 'supervisor') return loadChiefDeposits();
+  if (_isManagerRole((state.currentUser || {}).role)) return loadChiefDeposits();
   document.getElementById('dep-emp-toolbar').style.display = '';
   document.getElementById('dep-register-btn').style.display = '';
   const clrBtn = document.getElementById('dep-clear-po-btn');

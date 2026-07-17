@@ -16,7 +16,7 @@ function _timeAgo(iso) {
 
 async function loadNotifications() {
   const role = (state.currentUser || {}).role;
-  const el = document.getElementById(role === 'supervisor' ? 'dash-notif' : 'emp-notif');
+  const el = document.getElementById(_isManagerRole(role) ? 'dash-notif' : 'emp-notif');
   if (!el) return;
   let notes = [];
   try { notes = await api('GET', '/notifications'); } catch (e) { notes = []; }

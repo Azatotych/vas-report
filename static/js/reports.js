@@ -296,7 +296,7 @@ async function showArchiveDetail(id) {
   const r = await api('GET', '/reports/' + id).catch(() => null);
   if (!r) return;
   const el = document.getElementById('archive-detail');
-  const isSupervisor = state.currentUser && state.currentUser.role === 'supervisor';
+  const isSupervisor = state.currentUser && _isManagerRole(state.currentUser.role);
 
   const orderRows = (r.orders || []).map(o => {
     const pts = o.level === 'academy' ? WEIGHTS.order_academy : WEIGHTS.order_higher;
@@ -448,7 +448,7 @@ async function loadProfile() {
 function _renderProfileHero(p) {
   const u = state.currentUser || {};
   const name = [p.last_name, p.first_patronymic].filter(Boolean).join(' ') || u.username || '—';
-  const role = u.role === 'supervisor' ? 'Начальник' : 'Сотрудник';
+  const role = _roleLabel(u.role);
   const sub = [p.rank, role].filter(Boolean).join(' · ');
   const av = document.getElementById('profile-avatar');
   const nm = document.getElementById('profile-hero-name');

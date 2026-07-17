@@ -4,19 +4,40 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import os
+import json
 from pathlib import Path
 from datetime import date, datetime
 from html import escape
 import re
 
 from db import get_db, init_db
+from auth import (
+    SESSION_COOKIE,
+    audit_event,
+    authenticate,
+    authenticated_user,
+    cleanup_sessions,
+    clear_session_cookie,
+    create_session,
+    generate_temporary_password,
+    hash_password,
+    iso_utc,
+    normalize_username,
+    public_user,
+    revoke_session_token,
+    revoke_user_sessions,
+    set_session_cookie,
+    validate_password,
+    validate_username,
+    verify_password,
+)
 from parsers import parse_order_docx, parse_software_docx, parse_article_docx
 from export import generate_report_xlsx
 from software_doc import generate_software_docx
 import plan_calc
 from plan_doc import generate_plan_docx, MONTHS_RU
 
-APP_VERSION = "2.1.0"   # 2.0 — редизайн (картотека/дашборд/проверка); 2.1 — уведомления
+APP_VERSION = "3.0.0"   # 3.0 — защищённые аккаунты, пароли и серверные сессии
 
 BASE = Path(__file__).parent
 UPLOADS_DIR = BASE / "uploads"
@@ -25,14 +46,35 @@ LOGS_DIR = BASE / "logs"
 UPLOADS_DIR.mkdir(exist_ok=True)
 REPORTS_DIR.mkdir(exist_ok=True)
 LOGS_DIR.mkdir(exist_ok=True)
+MAX_UPLOAD_BYTES = max(1, int(os.environ.get("VAS_MAX_UPLOAD_MB", "20"))) * 1024 * 1024
+DOCUMENT_UPLOAD_SUFFIXES = {".docx", ".pdf", ".png", ".jpg", ".jpeg", ".webp"}
 
 app = FastAPI(title="ВАС Результативность")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+cors_origins = [x.strip() for x in os.environ.get("VAS_CORS_ORIGINS", "").split(",") if x.strip()]
+if cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_origins,
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PUT", "DELETE"],
+        allow_headers=["Content-Type"],
+    )
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "same-origin"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    return response
 
 
 @app.on_event("startup")
 def startup():
     init_db()
+    cleanup_sessions()
 
 
 @app.get("/api/version")
@@ -43,22 +85,28 @@ def get_version():
 # ── AUTH HELPERS ──────────────────────────────────────────────────────────────
 
 def _current_user(request: Request) -> dict:
-    uid = request.cookies.get('vas_uid', '')
-    if not uid or not uid.isdigit():
-        raise HTTPException(401, "Не авторизован")
-    conn = get_db()
-    row = conn.execute("SELECT * FROM users WHERE id=?", (int(uid),)).fetchone()
-    conn.close()
-    if not row:
-        raise HTTPException(401, "Пользователь не найден")
-    return dict(row)
+    return authenticated_user(request)
 
 
 def _require_supervisor(request: Request) -> dict:
     user = _current_user(request)
-    if user['role'] != 'supervisor':
+    if user['role'] not in ('supervisor', 'admin'):
         raise HTTPException(403, "Недостаточно прав")
     return user
+
+
+def _require_admin(request: Request) -> dict:
+    user = _current_user(request)
+    if user['role'] != 'admin':
+        raise HTTPException(403, "Требуются права администратора")
+    return user
+
+
+def _can_manage_user(actor: dict, target: dict):
+    if actor['role'] == 'admin':
+        return
+    if actor['role'] != 'supervisor' or target.get('role') != 'employee':
+        raise HTTPException(403, "Недостаточно прав для управления этой учётной записью")
 
 
 def _require(data: dict, *keys: str):
@@ -99,51 +147,160 @@ def _safe_upload_path(filename: str) -> Path:
     return path
 
 
-# ── SESSION ───────────────────────────────────────────────────────────────────
+async def _read_upload(file: UploadFile, allowed_suffixes: set[str]) -> bytes:
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix not in allowed_suffixes:
+        raise HTTPException(400, f"Недопустимый тип файла: {suffix or 'без расширения'}")
+    content = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            413, f"Файл слишком большой. Максимум {MAX_UPLOAD_BYTES // 1024 // 1024} МБ"
+        )
+    return content
 
-@app.get("/api/users/list")
-def list_users_public():
-    """Public: returns users for the login screen (dev mode — no passwords)."""
+
+def _authorize_upload(filename: str, user: dict):
+    if user['role'] in ('supervisor', 'admin'):
+        return
+    uid = user['id']
+    own_prefixes = (
+        f"confirm_{uid}_", f"conf_{uid}_", f"sw_{uid}_", f"art_{uid}_",
+        f"sw_manual_{uid}_",
+    )
+    if filename.startswith(own_prefixes):
+        return
     conn = get_db()
-    rows = conn.execute(
-        "SELECT id, username, role, last_name, first_patronymic, position FROM users "
-        "WHERE active=1 ORDER BY role DESC, last_name"
-    ).fetchall()
+    owned = conn.execute(
+        """
+        SELECT 1 FROM software WHERE user_id=? AND docx_filename=?
+        UNION ALL
+        SELECT 1 FROM articles WHERE user_id=? AND docx_filename=?
+        UNION ALL
+        SELECT 1 FROM report_orders ro
+          JOIN monthly_reports mr ON mr.id=ro.report_id
+          WHERE mr.user_id=? AND ro.confirmation_filename=?
+        UNION ALL
+        SELECT 1 FROM conferences c
+          JOIN monthly_reports mr ON mr.id=c.report_id
+          WHERE mr.user_id=? AND c.certificate_filename=?
+        LIMIT 1
+        """,
+        (uid, filename, uid, filename, uid, filename, uid, filename),
+    ).fetchone()
     conn.close()
-    return [dict(r) for r in rows]
+    if not owned:
+        raise HTTPException(404, "Файл не найден")
+
+
+# ── SESSION AND ACCOUNT SECURITY ──────────────────────────────────────────────
 
 
 @app.get("/api/me")
 def get_me(request: Request):
-    return _current_user(request)
+    return public_user(_current_user(request))
 
 
 @app.post("/api/session")
 async def login(request: Request, response: Response):
     data = await request.json()
-    uid = data.get('user_id')
-    if not uid:
-        raise HTTPException(400, "Укажите user_id")
-    conn = get_db()
-    row = conn.execute("SELECT * FROM users WHERE id=?", (int(uid),)).fetchone()
-    conn.close()
-    if not row:
-        raise HTTPException(404, "Пользователь не найден")
-    response.set_cookie('vas_uid', str(row['id']), httponly=True, samesite='lax', max_age=86400 * 30)
-    return {"ok": True, "user": dict(row)}
+    username = normalize_username(data.get('username', ''))
+    password = data.get('password', '')
+    if not username or not password:
+        raise HTTPException(400, "Введите логин и пароль")
+    user = authenticate(username, password, request)
+    token = create_session(user['id'], request)
+    set_session_cookie(response, token)
+    return {"ok": True, "user": public_user(user)}
 
 
 @app.delete("/api/session")
-def logout(response: Response):
-    response.delete_cookie('vas_uid')
+def logout(request: Request, response: Response):
+    revoke_session_token(request.cookies.get(SESSION_COOKIE, ''), request)
+    clear_session_cookie(response)
     return {"ok": True}
+
+
+@app.post("/api/account/password")
+async def change_password(request: Request):
+    user = _current_user(request)
+    data = await request.json()
+    current_password = data.get('current_password', '')
+    new_password = data.get('new_password', '')
+    conn = get_db()
+    row = conn.execute(
+        "SELECT password_hash, username FROM users WHERE id=?", (user['id'],)
+    ).fetchone()
+    if not row or not verify_password(current_password, row['password_hash']):
+        audit_event(conn, "password_change_failed", request, user_id=user['id'])
+        conn.commit()
+        conn.close()
+        raise HTTPException(400, "Текущий пароль указан неверно")
+    error = validate_password(new_password, row['username'])
+    if error:
+        conn.close()
+        raise HTTPException(400, error)
+    if verify_password(new_password, row['password_hash']):
+        conn.close()
+        raise HTTPException(400, "Новый пароль должен отличаться от текущего")
+    conn.execute(
+        "UPDATE users SET password_hash=?, must_change_password=0, "
+        "password_changed_at=?, failed_login_attempts=0, locked_until=NULL WHERE id=?",
+        (hash_password(new_password), iso_utc(), user['id']),
+    )
+    revoke_user_sessions(conn, user['id'], user.get('_session_id'))
+    audit_event(conn, "password_changed", request, user_id=user['id'])
+    conn.commit()
+    updated = conn.execute("SELECT * FROM users WHERE id=?", (user['id'],)).fetchone()
+    conn.close()
+    return {"ok": True, "user": public_user(dict(updated))}
+
+
+@app.get("/api/account/sessions")
+def list_own_sessions(request: Request):
+    user = _current_user(request)
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT id, created_at, last_seen_at, expires_at, ip_address, user_agent "
+        "FROM user_sessions WHERE user_id=? AND revoked_at IS NULL AND expires_at>? "
+        "ORDER BY last_seen_at DESC",
+        (user['id'], iso_utc()),
+    ).fetchall()
+    conn.close()
+    return [
+        {**dict(row), "current": row["id"] == user.get("_session_id")}
+        for row in rows
+    ]
+
+
+@app.delete("/api/account/sessions/{session_id}")
+def revoke_own_session(session_id: int, request: Request, response: Response):
+    user = _current_user(request)
+    conn = get_db()
+    row = conn.execute(
+        "SELECT id FROM user_sessions WHERE id=? AND user_id=? AND revoked_at IS NULL",
+        (session_id, user['id']),
+    ).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "Сессия не найдена")
+    conn.execute("UPDATE user_sessions SET revoked_at=? WHERE id=?", (iso_utc(), session_id))
+    audit_event(
+        conn, "session_revoked", request, user_id=user['id'],
+        target_type="session", target_id=session_id,
+    )
+    conn.commit()
+    conn.close()
+    current = session_id == user.get("_session_id")
+    if current:
+        clear_session_cookie(response)
+    return {"ok": True, "current": current}
 
 
 # ── PROFILE (current user) ────────────────────────────────────────────────────
 
 @app.get("/api/profile")
 def get_profile(request: Request):
-    return _current_user(request)
+    return public_user(_current_user(request))
 
 
 @app.put("/api/profile")
@@ -161,51 +318,121 @@ async def update_profile(request: Request):
     return {"ok": True}
 
 
-# ── USER MANAGEMENT (supervisor only) ─────────────────────────────────────────
+# ── USER MANAGEMENT ───────────────────────────────────────────────────────────
 
 @app.get("/api/users")
 def get_users(request: Request):
-    _require_supervisor(request)
+    actor = _require_supervisor(request)
     conn = get_db()
-    rows = conn.execute(
-        "SELECT id, username, role, last_name, first_patronymic, position, rank, unit FROM users ORDER BY role DESC, last_name"
-    ).fetchall()
+    if actor['role'] == 'admin':
+        rows = conn.execute(
+            "SELECT id, username, role, last_name, first_patronymic, position, rank, "
+            "unit, active, must_change_password, last_login_at, locked_until "
+            "FROM users ORDER BY active DESC, role DESC, last_name"
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT id, username, role, last_name, first_patronymic, position, rank, "
+            "unit, active, must_change_password, last_login_at, locked_until "
+            "FROM users WHERE role='employee' ORDER BY active DESC, last_name"
+        ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
 
 @app.post("/api/users")
 async def create_user(request: Request):
-    _require_supervisor(request)
+    actor = _require_supervisor(request)
     data = await request.json()
     _require(data, 'username')
+    username = normalize_username(data['username'])
+    error = validate_username(username)
+    if error:
+        raise HTTPException(400, error)
+    role = data.get('role', 'employee')
+    if role not in ('employee', 'supervisor', 'admin'):
+        raise HTTPException(400, "Неизвестная роль")
+    if actor['role'] != 'admin' and role != 'employee':
+        raise HTTPException(403, "Начальник может создавать только аккаунты сотрудников")
+    temporary_password = data.get('password') or generate_temporary_password()
+    error = validate_password(temporary_password, username)
+    if error:
+        raise HTTPException(400, error)
     conn = get_db()
+    if conn.execute("SELECT id FROM users WHERE lower(username)=?", (username,)).fetchone():
+        conn.close()
+        raise HTTPException(400, "Этот логин уже используется")
     try:
         conn.execute(
-            "INSERT INTO users (username, role, last_name, first_patronymic, position, rank, unit) VALUES (?,?,?,?,?,?,?)",
-            (data['username'], data.get('role', 'employee'), data.get('last_name', ''),
+            "INSERT INTO users "
+            "(username, role, last_name, first_patronymic, position, rank, unit, "
+            "active, password_hash, must_change_password) VALUES (?,?,?,?,?,?,?,1,?,1)",
+            (username, role, data.get('last_name', ''),
              data.get('first_patronymic', ''), data.get('position', ''),
-             data.get('rank', ''), data.get('unit', ''))
+             data.get('rank', ''), data.get('unit', ''), hash_password(temporary_password))
         )
         uid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        audit_event(
+            conn, "user_created", request, user_id=actor['id'],
+            target_type="user", target_id=uid,
+            details={"username": username, "role": role},
+        )
         conn.commit()
     except Exception as e:
         conn.close()
         raise HTTPException(400, f"Ошибка: {e}")
     conn.close()
-    return {"id": uid, "ok": True}
+    return {"id": uid, "ok": True, "temporary_password": temporary_password}
 
 
 @app.put("/api/users/{uid}")
 async def update_user(uid: int, request: Request):
-    _require_supervisor(request)
+    actor = _require_supervisor(request)
     data = await request.json()
     conn = get_db()
+    target_row = conn.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+    if not target_row:
+        conn.close()
+        raise HTTPException(404, "Пользователь не найден")
+    target = dict(target_row)
+    _can_manage_user(actor, target)
+    username = normalize_username(data.get('username', target['username']))
+    error = validate_username(username)
+    if error:
+        conn.close()
+        raise HTTPException(400, error)
+    duplicate = conn.execute(
+        "SELECT id FROM users WHERE lower(username)=? AND id<>?", (username, uid)
+    ).fetchone()
+    if duplicate:
+        conn.close()
+        raise HTTPException(400, "Этот логин уже используется")
+    role = data.get('role', target['role'])
+    if role not in ('employee', 'supervisor', 'admin'):
+        conn.close()
+        raise HTTPException(400, "Неизвестная роль")
+    if actor['role'] != 'admin':
+        role = 'employee'
+    if uid == actor['id'] and role != actor['role']:
+        conn.close()
+        raise HTTPException(400, "Нельзя изменить собственную роль")
+    active = 1 if data.get('active', target.get('active', 1)) else 0
+    if uid == actor['id'] and not active:
+        conn.close()
+        raise HTTPException(400, "Нельзя отключить собственный аккаунт")
     conn.execute(
-        "UPDATE users SET username=?, role=?, last_name=?, first_patronymic=?, position=?, rank=?, unit=? WHERE id=?",
-        (data.get('username', ''), data.get('role', 'employee'), data.get('last_name', ''),
+        "UPDATE users SET username=?, role=?, last_name=?, first_patronymic=?, "
+        "position=?, rank=?, unit=?, active=? WHERE id=?",
+        (username, role, data.get('last_name', ''),
          data.get('first_patronymic', ''), data.get('position', ''),
-         data.get('rank', ''), data.get('unit', ''), uid)
+         data.get('rank', ''), data.get('unit', ''), active, uid)
+    )
+    if not active:
+        revoke_user_sessions(conn, uid)
+    audit_event(
+        conn, "user_updated", request, user_id=actor['id'],
+        target_type="user", target_id=uid,
+        details={"username": username, "role": role, "active": bool(active)},
     )
     conn.commit()
     conn.close()
@@ -214,16 +441,100 @@ async def update_user(uid: int, request: Request):
 
 @app.delete("/api/users/{uid}")
 def delete_user(uid: int, request: Request):
-    sv = _require_supervisor(request)
-    if uid == sv['id']:
+    actor = _require_supervisor(request)
+    if uid == actor['id']:
         raise HTTPException(400, "Нельзя удалить собственный аккаунт")
     # Мягкое удаление: аккаунт уходит из логина и списков, но его отчёты/РИД
     # остаются в общем архиве с привязкой к ФИО (целостность учёта).
     conn = get_db()
+    row = conn.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "Пользователь не найден")
+    _can_manage_user(actor, dict(row))
     conn.execute("UPDATE users SET active=0 WHERE id=?", (uid,))
+    revoke_user_sessions(conn, uid)
+    audit_event(
+        conn, "user_disabled", request, user_id=actor['id'],
+        target_type="user", target_id=uid,
+    )
     conn.commit()
     conn.close()
     return {"ok": True}
+
+
+@app.post("/api/users/{uid}/reset-password")
+async def reset_user_password(uid: int, request: Request):
+    actor = _require_supervisor(request)
+    data = await request.json()
+    conn = get_db()
+    row = conn.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "Пользователь не найден")
+    target = dict(row)
+    _can_manage_user(actor, target)
+    temporary_password = data.get('password') or generate_temporary_password()
+    error = validate_password(temporary_password, target['username'])
+    if error:
+        conn.close()
+        raise HTTPException(400, error)
+    conn.execute(
+        "UPDATE users SET password_hash=?, must_change_password=1, active=1, "
+        "failed_login_attempts=0, locked_until=NULL, password_changed_at=? WHERE id=?",
+        (hash_password(temporary_password), iso_utc(), uid),
+    )
+    revoke_user_sessions(conn, uid)
+    audit_event(
+        conn, "password_reset", request, user_id=actor['id'],
+        target_type="user", target_id=uid,
+    )
+    conn.commit()
+    conn.close()
+    return {"ok": True, "temporary_password": temporary_password}
+
+
+@app.post("/api/users/{uid}/unlock")
+def unlock_user(uid: int, request: Request):
+    actor = _require_supervisor(request)
+    conn = get_db()
+    row = conn.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, "Пользователь не найден")
+    _can_manage_user(actor, dict(row))
+    conn.execute(
+        "UPDATE users SET failed_login_attempts=0, locked_until=NULL WHERE id=?", (uid,)
+    )
+    audit_event(
+        conn, "user_unlocked", request, user_id=actor['id'],
+        target_type="user", target_id=uid,
+    )
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+@app.get("/api/audit")
+def get_audit(request: Request, limit: int = 100):
+    _require_admin(request)
+    limit = min(500, max(1, limit))
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT ae.*, u.username FROM audit_events ae "
+        "LEFT JOIN users u ON u.id=ae.user_id ORDER BY ae.id DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    conn.close()
+    result = []
+    for row in rows:
+        item = dict(row)
+        try:
+            item['details'] = json.loads(item.get('details') or '{}')
+        except json.JSONDecodeError:
+            item['details'] = {}
+        result.append(item)
+    return result
 
 
 # ── ORDERS ────────────────────────────────────────────────────────────────────
@@ -321,14 +632,16 @@ def delete_order(order_id: int, request: Request):
 
 @app.post("/api/orders/parse")
 async def parse_order_file(request: Request, file: UploadFile = File(...)):
-    _current_user(request)
-    suffix = Path(file.filename).suffix
-    path = UPLOADS_DIR / f"order_parse_tmp{suffix}"
-    path.write_bytes(await file.read())
+    user = _current_user(request)
+    content = await _read_upload(file, {".docx"})
+    path = UPLOADS_DIR / f"order_parse_{user['id']}_{int(datetime.now().timestamp()*1000)}.docx"
+    path.write_bytes(content)
     try:
         return parse_order_docx(str(path))
     except Exception as e:
         raise HTTPException(400, f"Ошибка парсинга: {e}")
+    finally:
+        path.unlink(missing_ok=True)
 
 
 # ── FILE UPLOADS ──────────────────────────────────────────────────────────────
@@ -336,24 +649,28 @@ async def parse_order_file(request: Request, file: UploadFile = File(...)):
 @app.post("/api/upload/confirmation")
 async def upload_confirmation(request: Request, file: UploadFile = File(...), order_id: str = Form("")):
     user = _current_user(request)
+    content = await _read_upload(file, DOCUMENT_UPLOAD_SUFFIXES)
     safe_name = re.sub(r'[^\w.\-]', '_', file.filename or 'file')
     # уникальный префикс (пользователь + время), чтобы файлы не перетирали друг друга
     filename = f"confirm_{user['id']}_{order_id}_{int(datetime.now().timestamp()*1000)}_{safe_name}"
-    (UPLOADS_DIR / filename).write_bytes(await file.read())
+    (UPLOADS_DIR / filename).write_bytes(content)
     return {"filename": filename}
 
 
 @app.post("/api/upload/conference")
 async def upload_conference(request: Request, file: UploadFile = File(...)):
     user = _current_user(request)
+    content = await _read_upload(file, DOCUMENT_UPLOAD_SUFFIXES)
     safe_name = re.sub(r'[^\w.\-]', '_', file.filename or 'certificate')
     filename = f"conf_{user['id']}_{int(datetime.now().timestamp()*1000)}_{safe_name}"
-    (UPLOADS_DIR / filename).write_bytes(await file.read())
+    (UPLOADS_DIR / filename).write_bytes(content)
     return {"filename": filename}
 
 
 @app.get("/api/uploads/{filename}")
-def serve_upload(filename: str):
+def serve_upload(filename: str, request: Request):
+    user = _current_user(request)
+    _authorize_upload(filename, user)
     path = _safe_upload_path(filename)
     if not path.exists():
         raise HTTPException(404, "Файл не найден")
@@ -394,7 +711,9 @@ def _docx_to_html(path: Path) -> str:
 
 
 @app.get("/api/uploads/{filename}/preview")
-def preview_upload(filename: str):
+def preview_upload(filename: str, request: Request):
+    user = _current_user(request)
+    _authorize_upload(filename, user)
     path = _safe_upload_path(filename)
     if not path.exists():
         raise HTTPException(404, "Файл не найден")
@@ -477,10 +796,11 @@ def delete_software(sw_id: int, request: Request):
 @app.post("/api/software/parse")
 async def parse_software_file(request: Request, file: UploadFile = File(...)):
     user = _current_user(request)
+    content = await _read_upload(file, {".docx"})
     safe_name = re.sub(r'[^\w.\-]', '_', file.filename)
-    filename = f"sw_{safe_name}"
+    filename = f"sw_{user['id']}_{int(datetime.now().timestamp()*1000)}_{safe_name}"
     path = UPLOADS_DIR / filename
-    path.write_bytes(await file.read())
+    path.write_bytes(content)
     try:
         results = parse_software_docx(str(path))
         if not results:
@@ -529,7 +849,7 @@ async def create_software(request: Request):
     if not docx_filename:
         docx_bytes = generate_software_docx(data, user)
         safe_cert = re.sub(r'[^\w]', '_', cert)
-        docx_filename = f"sw_manual_{safe_cert}.docx"
+        docx_filename = f"sw_manual_{user['id']}_{safe_cert}.docx"
         (UPLOADS_DIR / docx_filename).write_bytes(docx_bytes)
 
     if existing:
@@ -559,12 +879,16 @@ async def create_software(request: Request):
 
 @app.get("/api/software/{sw_id}/docx")
 def download_software_docx(sw_id: int, request: Request):
-    _current_user(request)
+    user = _current_user(request)
     conn = get_db()
     row = conn.execute("SELECT * FROM software WHERE id=?", (sw_id,)).fetchone()
     if not row:
+        conn.close()
         raise HTTPException(404, "ПО не найдено")
     sw = dict(row)
+    if user['role'] not in ('supervisor', 'admin') and sw['user_id'] != user['id']:
+        conn.close()
+        raise HTTPException(404, "ПО не найдено")
     sw['authors'] = [dict(a) for a in conn.execute(
         "SELECT * FROM software_authors WHERE software_id=?", (sw_id,)
     ).fetchall()]
@@ -605,11 +929,12 @@ def get_articles(request: Request):
 
 @app.post("/api/articles/parse")
 async def parse_article_file(request: Request, file: UploadFile = File(...)):
-    _current_user(request)
+    user = _current_user(request)
+    content = await _read_upload(file, {".docx"})
     safe_name = re.sub(r'[^\w.\-]', '_', file.filename)
-    filename = f"art_{safe_name}"
+    filename = f"art_{user['id']}_{int(datetime.now().timestamp()*1000)}_{safe_name}"
     path = UPLOADS_DIR / filename
-    path.write_bytes(await file.read())
+    path.write_bytes(content)
     try:
         results = parse_article_docx(str(path))
         if not results:
@@ -779,7 +1104,7 @@ def get_report(report_id: int, request: Request):
     conn.close()
     if not row:
         raise HTTPException(404, "Отчёт не найден")
-    if user['role'] != 'supervisor' and row['user_id'] != user['id']:
+    if user['role'] not in ('supervisor', 'admin') and row['user_id'] != user['id']:
         raise HTTPException(403, "Доступ запрещён")
     return _get_report_data(report_id)
 
@@ -926,7 +1251,7 @@ def export_report(report_id: int, request: Request):
     conn.close()
     if not row:
         raise HTTPException(404, "Отчёт не найден")
-    if user['role'] != 'supervisor' and row['user_id'] != user['id']:
+    if user['role'] not in ('supervisor', 'admin') and row['user_id'] != user['id']:
         raise HTTPException(403, "Доступ запрещён")
     if not row['xlsx_path']:
         raise HTTPException(404, "Файл не найден")
@@ -1461,12 +1786,20 @@ def delete_plan_report(report_id: int, request: Request):
 
 @app.get("/api/supervisor/employees")
 def supervisor_employees(request: Request):
-    _require_supervisor(request)
+    actor = _require_supervisor(request)
     conn = get_db()
-    users = conn.execute(
-        "SELECT id, username, role, last_name, first_patronymic, position, unit FROM users "
-        "WHERE role='employee' AND active=1 ORDER BY last_name"
-    ).fetchall()
+    if actor['role'] == 'admin':
+        users = conn.execute(
+            "SELECT id, username, role, last_name, first_patronymic, position, rank, "
+            "unit, active, must_change_password, last_login_at, locked_until "
+            "FROM users ORDER BY active DESC, role DESC, last_name"
+        ).fetchall()
+    else:
+        users = conn.execute(
+            "SELECT id, username, role, last_name, first_patronymic, position, rank, "
+            "unit, active, must_change_password, last_login_at, locked_until "
+            "FROM users WHERE role='employee' ORDER BY active DESC, last_name"
+        ).fetchall()
     result = []
     for u in users:
         ud = dict(u)
@@ -1585,7 +1918,7 @@ def _current_notifications(conn, user: dict) -> list:
     Начальник: отчёты, поданные на проверку. Сотрудник: возвращённые с замечанием
     и утверждённые (за текущий месяц). Список самоочищается по смене статуса."""
     notes = []
-    if user['role'] == 'supervisor':
+    if user['role'] in ('supervisor', 'admin'):
         rows = conn.execute("""
             SELECT mr.id, mr.year, mr.month, mr.submitted_at,
                    u.username, u.last_name, u.first_patronymic
@@ -1763,11 +2096,13 @@ if __name__ == "__main__":
         },
     }
 
-    port = int(os.environ.get("PORT", "8001"))
+    host = os.environ.get("HOST", "127.0.0.1")
+    port = int(os.environ.get("PORT", "8000"))
+    open_browser = os.environ.get("VAS_OPEN_BROWSER", "1").lower() in ("1", "true", "yes")
 
-    if not os.environ.get("PORT"):
+    if open_browser and host in ("127.0.0.1", "localhost"):
         def _open():
             import time; time.sleep(1); webbrowser.open(f"http://127.0.0.1:{port}")
         threading.Thread(target=_open, daemon=True).start()
 
-    uvicorn.run("main:app", host="127.0.0.1", port=port, reload=False, log_config=log_config)
+    uvicorn.run("main:app", host=host, port=port, reload=False, log_config=log_config)

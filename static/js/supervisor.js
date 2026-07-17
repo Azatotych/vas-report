@@ -1,8 +1,11 @@
 // ─── EMPLOYEES SCREEN ─────────────────────────────────────────────────────
 let _editingUserId = null;
+let _editingUser = null;
+let _accountUsers = [];
 
 async function loadEmployees() {
   const data = await api('GET', '/supervisor/employees').catch(() => []);
+  _accountUsers = data;
   const wrap = document.getElementById('employees-list');
   document.getElementById('employee-archive-area').innerHTML = '';
   if (!data.length) {
@@ -11,26 +14,34 @@ async function loadEmployees() {
   }
   wrap.innerHTML = `<div class="emp-list">` + data.map(u => {
     const name = [u.last_name, u.first_patronymic].filter(Boolean).join(' ') || u.username;
-    const latest = u.reports && u.reports[0];
+    const isEmployee = u.role === 'employee';
+    const latest = isEmployee && u.reports && u.reports[0];
     const pts = latest ? (latest.total_points || 0) : 0;
     const pct = Math.min(100, pts / SCORE_CAP * 100);
     const status = latest ? latest.status : 'none';
     const meta = (typeof _DASH_STATUS !== 'undefined' && _DASH_STATUS[status]) || { label: 'Не подан', dot: 'var(--text-5)' };
-    const quick = latest && latest.status === 'submitted'
+    const quick = isEmployee && latest && latest.status === 'submitted'
       ? `<button class="btn btn-primary btn-sm" onclick="approveReport(${latest.id},'employees')">${ic('check')}</button>
          <button class="btn btn-danger btn-sm" onclick="openRejectModal(${latest.id},'employees')">${ic('close')}</button>` : '';
-    const open = latest
+    const open = isEmployee && latest
       ? `<button class="btn btn-secondary btn-sm" onclick="openReview(${latest.id},'employees')">Открыть</button>` : '';
+    const badges = [
+      `<span class="account-badge">${_roleLabel(u.role)}</span>`,
+      !u.active ? '<span class="account-badge danger">отключён</span>' :
+      (u.locked_until ? '<span class="account-badge danger">заблокирован</span>' :
+      (u.must_change_password ? '<span class="account-badge warn">временный пароль</span>' :
+      '<span class="account-badge ok">активен</span>')),
+    ].join('');
     return `<div class="emp-row">
       <div class="rank-avatar">${_initials(u)}</div>
-      <div class="emp-name"><div>${name}</div><div class="rank-sub">${u.rank || u.position || '—'} · ${u.username}</div></div>
-      <div class="emp-bar-wrap"><div class="rank-bar" style="width:${pct}%;background:${pts > SCORE_CAP ? 'var(--danger)' : 'var(--gold)'}"></div></div>
-      <div class="rank-pts">${round1(pts)}<span style="color:var(--text-5)">/30</span></div>
-      <div class="emp-reports">${u.reports ? u.reports.length : 0} отч.</div>
-      <div class="emp-status"><span class="status-dot" style="background:${meta.dot}"></span>${meta.label}</div>
+      <div class="emp-name"><div>${name}</div><div class="rank-sub">${u.rank || u.position || '—'} · ${u.username}</div><div class="account-badges">${badges}</div></div>
+      <div class="emp-bar-wrap">${isEmployee ? `<div class="rank-bar" style="width:${pct}%;background:${pts > SCORE_CAP ? 'var(--danger)' : 'var(--gold)'}"></div>` : ''}</div>
+      <div class="rank-pts">${isEmployee ? `${round1(pts)}<span style="color:var(--text-5)">/30</span>` : '—'}</div>
+      <div class="emp-reports">${isEmployee ? `${u.reports ? u.reports.length : 0} отч.` : 'система'}</div>
+      <div class="emp-status">${isEmployee ? `<span class="status-dot" style="background:${meta.dot}"></span>${meta.label}` : (u.last_login_at ? 'вход выполнен' : 'не входил')}</div>
       <div class="emp-actions">
         ${quick}${open}
-        <button class="btn btn-secondary btn-sm" onclick="showUserModal(${JSON.stringify(u).replace(/"/g,'&quot;')})" title="Изменить">${ic('edit')}</button>
+        <button class="btn btn-secondary btn-sm" onclick="showUserModal(${u.id})" title="Изменить">${ic('edit')}</button>
         <button class="btn btn-danger btn-sm" onclick="deleteUser(${u.id})" title="Удалить">${ic('trash')}</button>
       </div>
     </div>`;
@@ -168,15 +179,27 @@ async function supervisorDeleteReport(id) {
 
 // ─── USER MANAGEMENT ──────────────────────────────────────────────────────
 function showUserModal(user) {
-  _editingUserId = user && user.id ? user.id : null;
-  document.getElementById('user-modal-title').textContent = _editingUserId ? 'Редактировать сотрудника' : 'Добавить сотрудника';
-  document.getElementById('um-username').value = user ? (user.username || '') : '';
-  document.getElementById('um-role').value = user ? (user.role || 'employee') : 'employee';
-  document.getElementById('um-last').value = user ? (user.last_name || '') : '';
-  document.getElementById('um-fp').value = user ? (user.first_patronymic || '') : '';
-  document.getElementById('um-pos').value = user ? (user.position || '') : '';
-  document.getElementById('um-unit').value = user ? (user.unit || '') : '';
-  document.getElementById('um-rank').value = user ? (user.rank || '') : '';
+  _editingUser = typeof user === 'number' ? _accountUsers.find(u => u.id === user) : user;
+  _editingUserId = _editingUser && _editingUser.id ? _editingUser.id : null;
+  const isAdmin = (state.currentUser || {}).role === 'admin';
+  document.getElementById('user-modal-title').textContent = _editingUserId ? 'Редактировать аккаунт' : 'Добавить аккаунт';
+  document.getElementById('um-username').value = _editingUser ? (_editingUser.username || '') : '';
+  document.getElementById('um-role').value = _editingUser ? (_editingUser.role || 'employee') : 'employee';
+  document.getElementById('um-role').disabled = !isAdmin;
+  document.querySelector('#um-role option[value="admin"]').style.display = isAdmin ? '' : 'none';
+  document.querySelector('#um-role option[value="supervisor"]').style.display = isAdmin ? '' : 'none';
+  document.getElementById('um-last').value = _editingUser ? (_editingUser.last_name || '') : '';
+  document.getElementById('um-fp').value = _editingUser ? (_editingUser.first_patronymic || '') : '';
+  document.getElementById('um-pos').value = _editingUser ? (_editingUser.position || '') : '';
+  document.getElementById('um-unit').value = _editingUser ? (_editingUser.unit || '') : '';
+  document.getElementById('um-rank').value = _editingUser ? (_editingUser.rank || '') : '';
+  document.getElementById('um-active').value = _editingUser && !_editingUser.active ? '0' : '1';
+  document.getElementById('um-active-wrap').style.display = _editingUserId && isAdmin ? '' : 'none';
+  document.getElementById('um-reset-btn').style.display = _editingUserId ? '' : 'none';
+  document.getElementById('um-unlock-btn').style.display = _editingUserId && _editingUser.locked_until ? '' : 'none';
+  document.getElementById('account-modal-note').textContent = _editingUserId
+    ? 'Сброс пароля завершит активные сеансы и потребует задать новый пароль при следующем входе.'
+    : 'После создания будет сформирован временный пароль. Сотрудник сменит его при первом входе.';
   document.getElementById('user-modal-msg').innerHTML = '';
   document.getElementById('user-modal').style.display = 'flex';
 }
@@ -184,6 +207,7 @@ function showUserModal(user) {
 function closeUserModal() {
   document.getElementById('user-modal').style.display = 'none';
   _editingUserId = null;
+  _editingUser = null;
 }
 
 async function saveUser() {
@@ -195,6 +219,7 @@ async function saveUser() {
     position: document.getElementById('um-pos').value.trim(),
     unit: document.getElementById('um-unit').value.trim(),
     rank: document.getElementById('um-rank').value.trim(),
+    active: document.getElementById('um-active').value === '1',
   };
   if (!data.username) {
     document.getElementById('user-modal-msg').className = 'err-box';
@@ -204,14 +229,69 @@ async function saveUser() {
   try {
     if (_editingUserId) {
       await api('PUT', `/users/${_editingUserId}`, data);
+      closeUserModal();
+      loadEmployees();
     } else {
-      await api('POST', '/users', data);
+      const created = await api('POST', '/users', data);
+      closeUserModal();
+      showTemporaryPassword(data.username, created.temporary_password);
+      loadEmployees();
     }
-    closeUserModal();
-    loadEmployees();
   } catch(e) {
     document.getElementById('user-modal-msg').className = 'err-box';
     document.getElementById('user-modal-msg').textContent = e.message;
+  }
+}
+
+async function resetUserPassword() {
+  if (!_editingUserId || !_editingUser) return;
+  if (!confirm(`Сбросить пароль аккаунта «${_editingUser.username}»? Все его активные сеансы будут завершены.`)) return;
+  try {
+    const result = await api('POST', `/users/${_editingUserId}/reset-password`, {});
+    const username = _editingUser.username;
+    closeUserModal();
+    showTemporaryPassword(username, result.temporary_password);
+    loadEmployees();
+  } catch (e) {
+    const msg = document.getElementById('user-modal-msg');
+    msg.className = 'err-box';
+    msg.textContent = e.message;
+  }
+}
+
+async function unlockUser() {
+  if (!_editingUserId) return;
+  try {
+    await api('POST', `/users/${_editingUserId}/unlock`, {});
+    closeUserModal();
+    loadEmployees();
+    toast('Учётная запись разблокирована');
+  } catch (e) {
+    const msg = document.getElementById('user-modal-msg');
+    msg.className = 'err-box';
+    msg.textContent = e.message;
+  }
+}
+
+function showTemporaryPassword(username, password) {
+  document.getElementById('credential-username').textContent = username;
+  document.getElementById('credential-password').textContent = password;
+  document.getElementById('temporary-password-modal').style.display = 'flex';
+}
+
+function closeTemporaryPassword() {
+  document.getElementById('credential-password').textContent = '—';
+  document.getElementById('temporary-password-modal').style.display = 'none';
+}
+
+async function copyTemporaryCredentials() {
+  const username = document.getElementById('credential-username').textContent;
+  const password = document.getElementById('credential-password').textContent;
+  try {
+    await navigator.clipboard.writeText(`Логин: ${username}\nВременный пароль: ${password}`);
+    toast('Данные для входа скопированы');
+  } catch {
+    toast('Не удалось скопировать автоматически');
   }
 }
 

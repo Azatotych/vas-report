@@ -54,35 +54,69 @@ function _shortName(u) {
   const ini = (u.first_patronymic || '').split(/\s+/).filter(Boolean).map(w => w[0].toUpperCase() + '.').join(' ');
   return (ln + (ini ? ' ' + ini : '')) || u.username || '—';
 }
-
-// ─── SESSION ──────────────────────────────────────────────────────────────────
-async function showLoginScreen() {
-  document.getElementById('app').style.display = 'none';
-  document.getElementById('login-screen').style.display = 'flex';
-
-  const users = await fetch('/api/users/list').then(r => r.json()).catch(() => []);
-  const list = document.getElementById('login-user-list');
-  list.innerHTML = users.map(u => {
-    const roleLabel = u.role === 'supervisor' ? 'Начальник' : 'Сотрудник';
-    return `<button class="user-login-btn" onclick="selectUser(${u.id})">
-      <span class="user-login-icon">${_initials(u)}</span>
-      <div class="user-login-name">${_shortName(u)}</div>
-      <div class="user-login-role">${roleLabel}</div>
-    </button>`;
-  }).join('');
+function _roleLabel(role) {
+  return role === 'admin' ? 'Администратор' : (role === 'supervisor' ? 'Начальник' : 'Сотрудник');
+}
+function _isManagerRole(role) {
+  return role === 'supervisor' || role === 'admin';
 }
 
-async function selectUser(userId) {
-  const r = await fetch('/api/session', {
+// ─── SESSION ──────────────────────────────────────────────────────────────────
+function showLoginScreen(message = '') {
+  document.getElementById('app').style.display = 'none';
+  document.getElementById('login-screen').style.display = 'flex';
+  const modal = document.getElementById('password-modal');
+  if (modal) modal.style.display = 'none';
+  const msg = document.getElementById('login-msg');
+  if (msg) {
+    msg.textContent = message;
+    msg.style.display = message ? '' : 'none';
+  }
+  const password = document.getElementById('login-password');
+  if (password) password.value = '';
+  setTimeout(() => {
+    const username = document.getElementById('login-username');
+    if (username && !username.value) username.focus();
+    else if (password) password.focus();
+  }, 20);
+}
+
+async function loginWithPassword(event) {
+  if (event) event.preventDefault();
+  const username = document.getElementById('login-username').value.trim();
+  const password = document.getElementById('login-password').value;
+  const msg = document.getElementById('login-msg');
+  const btn = document.getElementById('login-submit');
+  if (!username || !password) {
+    msg.textContent = 'Введите логин и пароль';
+    msg.style.display = '';
+    return;
+  }
+  btn.disabled = true;
+  msg.style.display = 'none';
+  const response = await fetch('/api/session', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ user_id: userId }),
-  }).then(r => r.json()).catch(() => null);
-  if (!r || !r.ok) { alert('Ошибка входа'); return; }
-  state.currentUser = r.user;
-  state.profile = r.user;
+    body: JSON.stringify({ username, password }),
+  }).catch(() => null);
+  btn.disabled = false;
+  if (!response) {
+    msg.textContent = 'Сервер недоступен';
+    msg.style.display = '';
+    return;
+  }
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || !data.ok) {
+    msg.textContent = typeof data.detail === 'string' ? data.detail : 'Неверный логин или пароль';
+    msg.style.display = '';
+    return;
+  }
+  state.currentUser = data.user;
+  state.profile = data.user;
+  document.getElementById('login-password').value = '';
   document.getElementById('login-screen').style.display = 'none';
-  initApp();
+  if (data.user.must_change_password) openPasswordModal(true);
+  else initApp();
 }
 
 async function logout() {
@@ -92,6 +126,7 @@ async function logout() {
   state.addedItems = [];
   state.confirmations = {};
   state.rework = null;
+  closePasswordModal(true);
   if (typeof renderReworkBanner === 'function') renderReworkBanner();
   showLoginScreen();
 }
@@ -105,7 +140,7 @@ function initApp() {
   const roleEl = document.getElementById('sidebar-user-role');
   const iconEl = document.getElementById('sidebar-user-icon');
   if (nameEl) nameEl.textContent = _shortName(u);
-  if (roleEl) roleEl.textContent = u.role === 'supervisor' ? 'Начальник' : 'Сотрудник';
+  if (roleEl) roleEl.textContent = _roleLabel(u.role);
   if (iconEl) iconEl.textContent = _initials(u);
 
   const show = ids => ids.forEach(id => { const el = document.getElementById(id); if (el) el.style.display = ''; });
@@ -115,7 +150,7 @@ function initApp() {
   // Разделы начальника
   const management = ['nav-section-supervisor', 'nav-dashboard', 'nav-employees'];
 
-  if (u.role === 'supervisor') {
+  if (_isManagerRole(u.role)) {
     hide(personal);
     show(management);
     nav('dashboard');
@@ -149,7 +184,12 @@ window.onload = async function() {
     });
     state.currentUser = me;
     state.profile = me;
-    initApp();
+    if (me.must_change_password) {
+      document.getElementById('login-screen').style.display = 'none';
+      openPasswordModal(true);
+    } else {
+      initApp();
+    }
   } catch {
     showLoginScreen();
   }
@@ -167,7 +207,11 @@ async function api(method, path, body) {
   }
   if (!r.ok) {
     const e = await r.json().catch(() => ({ detail: 'Ошибка сервера' }));
-    throw new Error(e.detail || 'Ошибка');
+    const detail = typeof e.detail === 'object' ? (e.detail.message || 'Ошибка') : e.detail;
+    if (r.status === 403 && detail === 'Необходимо изменить временный пароль') {
+      openPasswordModal(true);
+    }
+    throw new Error(detail || 'Ошибка');
   }
   return r.json();
 }
@@ -201,8 +245,9 @@ const EMP_SCREENS = ['submit', 'archive', 'stats', 'deposits', 'orders', 'profil
 function nav(screen) {
   // Роль определяет доступ к экранам: личные недоступны начальнику и наоборот.
   const role = (state.currentUser || {}).role;
-  const allowed = role === 'supervisor' ? CHIEF_SCREENS : EMP_SCREENS;
-  if (!allowed.includes(screen)) screen = role === 'supervisor' ? 'dashboard' : 'submit';
+  const manager = _isManagerRole(role);
+  const allowed = manager ? CHIEF_SCREENS : EMP_SCREENS;
+  if (!allowed.includes(screen)) screen = manager ? 'dashboard' : 'submit';
 
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
@@ -218,6 +263,90 @@ function nav(screen) {
   if (screen === 'plan') loadPlan();
   if (screen === 'dashboard') { loadDashboard(); if (typeof loadNotifications === 'function') loadNotifications(); }
   if (screen === 'employees') loadEmployees();
+}
+
+// ─── PASSWORD AND ACTIVE SESSIONS ──────────────────────────────────────────
+let _passwordForced = false;
+
+function openPasswordModal(forced = false) {
+  _passwordForced = !!forced;
+  document.getElementById('password-modal-title').textContent =
+    forced ? 'Смените временный пароль' : 'Изменить пароль';
+  document.getElementById('password-modal-lead').textContent =
+    forced ? 'Для продолжения работы задайте собственный пароль.' : 'Введите текущий пароль и задайте новый.';
+  document.getElementById('password-cancel').style.display = forced ? 'none' : '';
+  document.getElementById('pw-current').value = '';
+  document.getElementById('pw-new').value = '';
+  document.getElementById('pw-repeat').value = '';
+  document.getElementById('password-msg').innerHTML = '';
+  document.getElementById('password-modal').style.display = 'flex';
+  setTimeout(() => document.getElementById('pw-current').focus(), 20);
+}
+
+function closePasswordModal(force = false) {
+  if (_passwordForced && !force) return;
+  const modal = document.getElementById('password-modal');
+  if (modal) modal.style.display = 'none';
+  _passwordForced = false;
+}
+
+async function changeOwnPassword() {
+  const current = document.getElementById('pw-current').value;
+  const next = document.getElementById('pw-new').value;
+  const repeat = document.getElementById('pw-repeat').value;
+  const msg = document.getElementById('password-msg');
+  if (next !== repeat) {
+    msg.className = 'err-box';
+    msg.textContent = 'Новые пароли не совпадают';
+    return;
+  }
+  try {
+    const result = await api('POST', '/account/password', {
+      current_password: current,
+      new_password: next,
+    });
+    state.currentUser = result.user;
+    state.profile = result.user;
+    const forced = _passwordForced;
+    closePasswordModal(true);
+    if (forced) initApp();
+    else showMsg('profile-msg', 'Пароль изменён');
+  } catch (e) {
+    msg.className = 'err-box';
+    msg.textContent = e.message;
+  }
+}
+
+function _sessionDevice(userAgent) {
+  if (!userAgent) return 'Неизвестное устройство';
+  if (/Windows/i.test(userAgent)) return 'Рабочая станция Windows';
+  if (/Android/i.test(userAgent)) return 'Устройство Android';
+  if (/iPhone|iPad/i.test(userAgent)) return 'Устройство Apple';
+  return 'Рабочая станция';
+}
+
+async function loadAccountSessions() {
+  const box = document.getElementById('account-sessions');
+  box.style.display = '';
+  box.innerHTML = '<div class="empty-state">Загрузка…</div>';
+  try {
+    const sessions = await api('GET', '/account/sessions');
+    box.innerHTML = sessions.map(s => `
+      <div class="account-session-row">
+        <div>
+          <div class="account-session-title">${_sessionDevice(s.user_agent)}${s.current ? ' · текущий сеанс' : ''}</div>
+          <div class="account-session-sub">IP: ${s.ip_address || '—'} · активность: ${new Date(s.last_seen_at).toLocaleString('ru-RU')}</div>
+        </div>
+        ${s.current ? '' : `<button class="btn btn-danger btn-sm" onclick="revokeAccountSession(${s.id})">Завершить</button>`}
+      </div>`).join('') || '<div class="empty-state">Нет активных сеансов</div>';
+  } catch (e) {
+    box.innerHTML = `<div class="err-box">${e.message}</div>`;
+  }
+}
+
+async function revokeAccountSession(id) {
+  await api('DELETE', `/account/sessions/${id}`);
+  loadAccountSessions();
 }
 
 // ─── SCORE ─────────────────────────────────────────────────────────────────

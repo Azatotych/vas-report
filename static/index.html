@@ -17,10 +17,23 @@
     <div class="login-logo">
       <div class="login-logo-badge">Н5</div>
       <div class="login-logo-title">Система учёта результативности</div>
-      <div class="login-logo-sub">ВАС · НИО-5</div>
+      <div class="login-logo-sub">Военная академия связи · НИО-5</div>
     </div>
-    <div class="login-user-grid" id="login-user-list"></div>
-    <div class="login-footer">Без пароля · вход с рабочей станции подразделения <span id="login-version" class="login-version"></span></div>
+    <form class="login-form" onsubmit="loginWithPassword(event)">
+      <div class="login-field">
+        <label for="login-username">Логин</label>
+        <input id="login-username" name="username" type="text" autocomplete="username"
+               autocapitalize="none" spellcheck="false" placeholder="ivanov_a" maxlength="64">
+      </div>
+      <div class="login-field">
+        <label for="login-password">Пароль</label>
+        <input id="login-password" name="password" type="password"
+               autocomplete="current-password" placeholder="Введите пароль" maxlength="128">
+      </div>
+      <div id="login-msg" class="login-message" style="display:none"></div>
+      <button id="login-submit" class="login-submit" type="submit">Войти в систему</button>
+    </form>
+    <div class="login-footer">Защищённая учётная запись <span id="login-version" class="login-version"></span></div>
   </div>
   <div class="login-credit">
     <div class="login-credit-pre">Программное обеспечение создано силами</div>
@@ -263,7 +276,7 @@
             <div class="profile-hero-name" id="profile-hero-name">—</div>
             <div class="profile-hero-sub" id="profile-hero-sub">—</div>
           </div>
-          <button class="btn btn-secondary" onclick="logout()">⤿ Сменить учётную запись</button>
+          <button class="btn btn-secondary" onclick="logout()">⤿ Выйти</button>
         </div>
         <div class="card">
           <div class="card-header"><div class="card-title">Данные</div></div>
@@ -279,6 +292,26 @@
               <button class="btn btn-primary" onclick="saveProfile()"><svg class="ic" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5L20 6"/></svg> Сохранить</button>
             </div>
             <div id="profile-msg" style="margin-top:10px"></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-header"><div class="card-title">Безопасность</div></div>
+          <div class="card-body">
+            <div class="account-security-row">
+              <div>
+                <div class="account-security-title">Пароль</div>
+                <div class="account-security-sub">Не менее 12 символов. После смены остальные сеансы будут завершены.</div>
+              </div>
+              <button class="btn btn-secondary" onclick="openPasswordModal(false)">Изменить пароль</button>
+            </div>
+            <div class="account-security-row">
+              <div>
+                <div class="account-security-title">Активные сеансы</div>
+                <div class="account-security-sub">Рабочие станции, на которых выполнен вход в вашу учётную запись.</div>
+              </div>
+              <button class="btn btn-secondary" onclick="loadAccountSessions()">Показать</button>
+            </div>
+            <div id="account-sessions" style="display:none;margin-top:12px"></div>
           </div>
         </div>
       </div>
@@ -302,8 +335,8 @@
     <div id="screen-employees" class="screen">
       <div class="topbar">
         <div>
-          <div class="topbar-eyebrow">Контроль и проверка</div>
-          <div class="topbar-title">Сотрудники</div>
+          <div class="topbar-eyebrow">Контроль, проверка и доступ</div>
+          <div class="topbar-title">Сотрудники и аккаунты</div>
         </div>
         <button class="btn btn-primary" onclick="showUserModal()">+ Добавить аккаунт</button>
       </div>
@@ -362,16 +395,23 @@
   </div>
 </div>
 
-<!-- ═══ USER MODAL (supervisor) ═══ -->
+<!-- ═══ USER MODAL (supervisor / admin) ═══ -->
 <div id="user-modal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeUserModal()">
   <div class="modal">
-    <div class="modal-title" id="user-modal-title">Добавить сотрудника</div>
+    <div class="modal-title" id="user-modal-title">Добавить аккаунт</div>
     <div class="form-grid">
       <div class="field"><label>Логин (уникальный)</label><input type="text" id="um-username" placeholder="ivanov_a"></div>
       <div class="field"><label>Роль</label>
         <select id="um-role">
           <option value="employee">Сотрудник</option>
           <option value="supervisor">Начальник</option>
+          <option value="admin">Администратор</option>
+        </select>
+      </div>
+      <div class="field full" id="um-active-wrap" style="display:none"><label>Состояние аккаунта</label>
+        <select id="um-active">
+          <option value="1">Активен</option>
+          <option value="0">Отключён</option>
         </select>
       </div>
       <div class="field"><label>Фамилия</label><input type="text" id="um-last"></div>
@@ -380,10 +420,50 @@
       <div class="field full"><label>Подразделение</label><input type="text" id="um-unit"></div>
       <div class="field full"><label>Звание / ранг</label><input type="text" id="um-rank"></div>
     </div>
+    <div class="account-modal-note" id="account-modal-note">После создания будет сформирован временный пароль. Сотрудник сменит его при первом входе.</div>
     <div id="user-modal-msg" style="margin-top:8px"></div>
     <div class="modal-footer">
+      <button class="btn btn-secondary" id="um-reset-btn" style="display:none;margin-right:auto" onclick="resetUserPassword()">Сбросить пароль</button>
+      <button class="btn btn-secondary" id="um-unlock-btn" style="display:none" onclick="unlockUser()">Разблокировать</button>
       <button class="btn btn-secondary" onclick="closeUserModal()">Отмена</button>
       <button class="btn btn-primary" onclick="saveUser()">Сохранить</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ PASSWORD CHANGE MODAL ═══ -->
+<div id="password-modal" class="modal-overlay" style="display:none">
+  <div class="modal password-modal">
+    <div class="modal-title" id="password-modal-title">Изменить пароль</div>
+    <div class="password-modal-lead" id="password-modal-lead">Введите текущий пароль и задайте новый.</div>
+    <div class="form-grid">
+      <div class="field full"><label>Текущий пароль</label><input type="password" id="pw-current" autocomplete="current-password" maxlength="128"></div>
+      <div class="field full"><label>Новый пароль</label><input type="password" id="pw-new" autocomplete="new-password" maxlength="128"></div>
+      <div class="field full"><label>Повторите новый пароль</label><input type="password" id="pw-repeat" autocomplete="new-password" maxlength="128"></div>
+    </div>
+    <div class="password-rules">Минимум 12 символов; пароль не должен содержать логин.</div>
+    <div id="password-msg" style="margin-top:10px"></div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" id="password-cancel" onclick="closePasswordModal()">Отмена</button>
+      <button class="btn btn-primary" onclick="changeOwnPassword()">Сохранить пароль</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ ONE-TIME TEMPORARY PASSWORD ═══ -->
+<div id="temporary-password-modal" class="modal-overlay" style="display:none">
+  <div class="modal temporary-password-modal">
+    <div class="modal-title">Временный пароль создан</div>
+    <div class="password-modal-lead">Передайте данные сотруднику по служебному каналу. После закрытия окна пароль больше не показывается.</div>
+    <div class="credential-box">
+      <div class="credential-label">Логин</div>
+      <div class="credential-value" id="credential-username">—</div>
+      <div class="credential-label">Временный пароль</div>
+      <div class="credential-value credential-password" id="credential-password">—</div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="copyTemporaryCredentials()">Копировать</button>
+      <button class="btn btn-primary" onclick="closeTemporaryPassword()">Готово</button>
     </div>
   </div>
 </div>
