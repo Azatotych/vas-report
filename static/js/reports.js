@@ -246,6 +246,8 @@ function renderReworkBanner() {
 }
 
 // ─── ARCHIVE ───────────────────────────────────────────────────────────────
+// TEST-ONLY: clearArchive/clearOrders — массовая очистка для этапа тестирования.
+// Удалить перед продакшеном (вместе с кнопками в index.html и эндпоинтами в main.py).
 async function clearArchive() {
   if (!confirm('Удалить всю историю отчётов? Приказы, ПО и статьи останутся, использованные в отчётах ПО/статьи вернутся в картотеку.')) return;
   await api('DELETE', '/reports/all');

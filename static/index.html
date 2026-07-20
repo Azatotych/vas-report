@@ -4,9 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Результативность — ВАС</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Serif:wght@400;500;600&display=swap" rel="stylesheet">
+<!-- Шрифты обслуживаются локально (ЛВС без интернета): см. static/fonts.css -->
+<link rel="stylesheet" href="/static/fonts.css">
 <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
@@ -156,6 +155,7 @@
           <div class="topbar-title">Реестр приказов</div>
         </div>
         <div style="display:flex;gap:8px;align-items:center">
+          <!-- TEST-ONLY: убрать кнопку перед продакшеном (см. clear_all_orders в main.py) -->
           <button class="btn btn-danger btn-sm" onclick="clearOrders()"><svg class="ic" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg> Очистить реестр приказов</button>
           <button class="btn btn-primary" onclick="showOrderModal()">+ Добавить приказ</button>
         </div>
@@ -196,6 +196,7 @@
           <div class="topbar-eyebrow">История отчётов</div>
           <div class="topbar-title">Архив</div>
         </div>
+        <!-- TEST-ONLY: убрать кнопку перед продакшеном (см. clear_all_reports в main.py) -->
         <button class="btn btn-danger btn-sm" onclick="clearArchive()"><svg class="ic" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg> Очистить историю отчётов</button>
       </div>
       <div class="content">
@@ -239,6 +240,7 @@
           <div class="topbar-title">Картотека РИД</div>
         </div>
         <div style="display:flex;gap:8px;align-items:center">
+          <!-- TEST-ONLY: убрать кнопку перед продакшеном (см. clear_all_software в main.py) -->
           <button class="btn btn-danger btn-sm" id="dep-clear-po-btn" onclick="clearSoftware()"><svg class="ic" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg> Очистить базу ПО</button>
           <button class="btn btn-primary" id="dep-register-btn" onclick="openRegisterModal()">+ Зарегистрировать</button>
         </div>

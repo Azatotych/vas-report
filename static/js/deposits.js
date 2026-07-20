@@ -171,6 +171,8 @@ async function loadChiefDeposits() {
   renderChiefDeposits();
 }
 
+// TEST-ONLY: массовая очистка базы ПО для этапа тестирования.
+// Удалить перед продакшеном (кнопка dep-clear-po-btn в index.html + clear_all_software в main.py).
 async function clearSoftware() {
   if (!confirm('Удалить все карточки ПО (включая поданные)? Статьи останутся. Ссылки на ПО в поданных отчётах будут сняты.')) return;
   try {
