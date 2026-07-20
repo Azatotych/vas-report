@@ -74,7 +74,8 @@ if cors_origins:
 async def security_headers(request: Request, call_next):
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
+    # SAMEORIGIN, не DENY: предпросмотр документов рендерится в same-origin iframe
+    response.headers["X-Frame-Options"] = "SAMEORIGIN"
     response.headers["Referrer-Policy"] = "same-origin"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
     return response
@@ -234,7 +235,10 @@ def get_me(request: Request):
 
 @app.post("/api/session")
 async def login(request: Request, response: Response):
-    data = await request.json()
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(400, "Некорректный запрос")
     username = normalize_username(data.get('username', ''))
     password = data.get('password', '')
     if not username or not password:
@@ -242,6 +246,7 @@ async def login(request: Request, response: Response):
     user = authenticate(username, password, request)
     token = create_session(user['id'], request)
     set_session_cookie(response, token)
+    cleanup_sessions()   # уборка протухших сессий: вход — редкое событие, запрос дешёвый
     return {"ok": True, "user": public_user(user)}
 
 
