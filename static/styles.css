@@ -299,6 +299,7 @@ select, textarea, input { scrollbar-width: thin; scrollbar-color: #2E3540 var(--
 .sw-parse-badge { display: inline-flex; align-items: center; gap: 4px; margin-top: 5px; font-size: 10.5px; font-weight: 600; padding: 2px 7px; border-radius: 5px; }
 .sw-parse-badge.used { background: rgba(224,86,86,.16); color: var(--danger); }
 .sw-parse-badge.bank { background: rgba(201,164,90,.14); color: var(--gold-dim); }
+.sw-parse-badge.ready { background: rgba(80,180,120,.15); color: #6FC99A; }
 .sw-parse-badge .ic { width: 12px; height: 12px; }
 .divider { height: 1px; background: var(--border); margin: 12px 0; }
 .empty-state { text-align: center; padding: 36px; color: var(--text-5); font-size: 13px; }

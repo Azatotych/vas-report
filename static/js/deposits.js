@@ -319,6 +319,15 @@ async function saveRegister() {
     if (_regType === 'po') {
       const data = collectSoftwareData();
       if (!data) return;
+      if (stageSelectedSoftwareRegistration(data)) {
+        toast('Распределение сохранено. Выберите следующую программу.');
+        return;
+      }
+      if (data.id) {
+        closeRegisterModal();
+        toast('Это ПО уже зарегистрировано в картотеке');
+        return;
+      }
       res = await api('POST', '/software', data);
     } else {
       const c = collectArticleData(_regArtType);

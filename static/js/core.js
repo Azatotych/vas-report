@@ -433,13 +433,7 @@ function editItem(key) {
     setTimeout(() => {
       swMode('manual');
       const d = item.data;
-      document.getElementById('sw-title').value = d.title || '';
-      document.getElementById('sw-cert').value = d.certificate_number || '';
-      document.getElementById('sw-date').value = d.registration_date ? isoDate(d.registration_date) : '';
-      document.getElementById('sw-output').value = d.output_data || '';
-      const tbody = document.getElementById('sw-authors-body');
-      if (tbody) { tbody.innerHTML = ''; (d.authors || []).forEach(a => addAuthorRow(a.full_name, a.position, a.contribution_percent)); }
-      recalcSwPts();   // баллы автоматически из вклада
+      _fillSwForm(d);
       const btn = document.querySelector('[onclick="addSoftwareToReport()"]');
       if (btn) btn.innerHTML = ic('check') + ' Сохранить изменения';
     }, 50);

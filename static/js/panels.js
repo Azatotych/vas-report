@@ -84,18 +84,19 @@ async function uploadConfirmation(orderId, input) {
 function buildSoftwarePanel(embed) {
   return `${embed ? '' : `<div class="panel-title">ПО / Свидетельство ФИПС <button class="btn btn-secondary btn-sm" onclick="closePanel()">${ic('close')} закрыть</button></div>`}
     <div class="mode-toggle">
-      <button class="mode-btn" id="sw-btn-upload" onclick="swMode('upload')">${ic('upload')} Загрузить .docx</button>
+      <button class="mode-btn" id="sw-btn-upload" onclick="swMode('upload')">${ic('upload')} Загрузить файлы</button>
       <button class="mode-btn active" id="sw-btn-manual" onclick="swMode('manual')">${ic('edit')} Ввести вручную</button>
     </div>
     <div id="sw-upload-zone" style="display:none">
       <div class="upload-zone" onclick="document.getElementById('sw-file-input').click()">
         <div style="margin-bottom:5px;color:var(--gold)">${ic('file',26)}</div>
-        Выберите «Докладная записка ПО.docx»
+        Выберите свидетельства ФИПС PDF или «Докладную записку ПО.docx»
+        <div style="font-size:11px;color:var(--text-4);margin-top:5px">Можно выбрать до 50 файлов одновременно. В PDF доли не указаны — распределите их вручную для каждой программы.</div>
       </div>
-      <input type="file" id="sw-file-input" accept=".docx" style="display:none" onchange="parseSoftwareFile(this)">
+      <input type="file" id="sw-file-input" accept=".docx,.pdf" multiple style="display:none" onchange="parseSoftwareFile(this)">
       <div id="sw-parse-result" style="display:none"></div>
     </div>
-    <div id="sw-manual-form">
+    <div id="sw-manual-form" data-embed="${embed ? '1' : '0'}">
       <div class="form-grid" style="margin-bottom:12px">
         <div class="field full"><label>Название ПО</label>
           <input type="text" id="sw-title" placeholder="Название программы"></div>
@@ -140,6 +141,10 @@ function swMode(mode) {
   document.getElementById('sw-manual-form').style.display = mode === 'manual' ? '' : 'none';
   document.getElementById('sw-btn-upload').classList.toggle('active', mode === 'upload');
   document.getElementById('sw-btn-manual').classList.toggle('active', mode === 'manual');
+  if (_isSoftwareRegisterMode()) {
+    const saveButton = document.getElementById('register-save-btn');
+    if (saveButton) saveButton.style.display = mode === 'manual' ? '' : 'none';
+  }
 }
 
 function addAuthorRow(fio='', pos='', pct=100) {
@@ -147,8 +152,8 @@ function addAuthorRow(fio='', pos='', pct=100) {
   if (!tbody) return;
   const tr = document.createElement('tr');
   tr.innerHTML = `
-    <td><input type="text" value="${fio}" placeholder="Иванов И.И." oninput="recalcSwPts()"></td>
-    <td><input type="text" value="${pos}" placeholder="МНС НИО-5"></td>
+    <td><input type="text" value="${_swEsc(fio)}" placeholder="Иванов И.И." oninput="recalcSwPts()"></td>
+    <td><input type="text" value="${_swEsc(pos)}" placeholder="МНС НИО-5"></td>
     <td><input type="number" value="${pct}" min="0" max="100" oninput="recalcSwPts()" style="text-align:center"></td>
     <td><button onclick="this.closest('tr').remove();recalcSwPts()" style="background:none;border:none;cursor:pointer;color:var(--text-5);font-size:14px">${ic('close')}</button></td>`;
   tbody.appendChild(tr);
@@ -157,6 +162,28 @@ function addAuthorRow(fio='', pos='', pct=100) {
 
 function round2(n) { return Math.round(n * 100) / 100; }
 function _fmtPts(n) { return round2(n).toString(); }
+
+function _swEsc(value) {
+  return String(value ?? '').replace(/[&<>"']/g, ch => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  })[ch]);
+}
+
+function normalizeSoftwareCertificate(value) {
+  const text = String(value || '').trim().replace(/\s+/g, ' ');
+  const match = text.match(/^(?:RU[\s-]*)?(\d{6,})$/i);
+  return match ? `RU ${match[1]}` : text;
+}
+
+function softwareCertificateKey(value) {
+  const normalized = normalizeSoftwareCertificate(value);
+  const match = normalized.match(/^RU\s+(\d+)$/i);
+  return match ? match[1] : normalized.toUpperCase().replace(/[^A-ZА-ЯЁ0-9]/g, '');
+}
+
+function _isSoftwareRegisterMode() {
+  return document.getElementById('sw-manual-form')?.dataset.embed === '1';
+}
 
 // Баллы ПО ЖЁСТКО связаны с вкладом: балл автора = вклад% / 100 × 5.
 // Поля баллов — только для чтения; меняешь % — меняются баллы.
@@ -226,7 +253,9 @@ function noMyPointsMsg() {
 // Один источник истины для inline-добавления в отчёт И для регистрации в картотеку.
 function collectSoftwareData() {
   const title = document.getElementById('sw-title').value.trim();
-  const cert = document.getElementById('sw-cert').value.trim();
+  const certInput = document.getElementById('sw-cert');
+  const cert = normalizeSoftwareCertificate(certInput.value);
+  certInput.value = cert;
   const date = document.getElementById('sw-date').value;
   const output = document.getElementById('sw-output').value.trim();
   if (!title || !cert) { alert('Введите название и номер свидетельства'); return null; }
@@ -235,7 +264,16 @@ function collectSoftwareData() {
   const authors = getAuthorsFromForm();
   const myPts = round2(myPointsFrom(authors, 'points_claimed'));
   if (myPts <= 0) { alert(noMyPointsMsg()); return null; }
-  return { title, certificate_number: cert, registration_date: date, output_data: output, authors, points_claimed: myPts };
+  const fileInput = document.getElementById('sw-file-input');
+  if (fileInput?._alreadyUsed) {
+    alert('Это свидетельство уже было подано в одном из отчётов');
+    return null;
+  }
+  return {
+    title, certificate_number: cert, registration_date: date, output_data: output,
+    authors, points_claimed: myPts, docx_filename: fileInput?._docxFilename || null,
+    id: fileInput?._softwareId || null,
+  };
 }
 
 function addSoftwareToReport() {
@@ -258,80 +296,204 @@ function addSoftwareToReport() {
     return;
   }
 
-  if (state.addedItems.find(i => i.type === 'software' && i.data.certificate_number === cert)) {
+  const certKey = softwareCertificateKey(cert);
+  if (state.addedItems.find(i => i.type === 'software' && softwareCertificateKey(i.data.certificate_number) === certKey)) {
     alert('Это свидетельство уже добавлено в отчёт'); return;
   }
   addItem('software', ic('software'), title, `№${cert} · ПО (п.20)`, myPts, data);
 
+  if (_storeSelectedSoftwareInBatch(data, 'report')) {
+    toast('Программа добавлена в отчёт. Выберите следующую.');
+    return;
+  }
+
   // Reset form
-  document.getElementById('sw-title').value = '';
-  document.getElementById('sw-cert').value = '';
-  document.getElementById('sw-date').value = '';
-  document.getElementById('sw-output').value = '';
-  document.getElementById('sw-authors-body').innerHTML = '';
-  if (document.getElementById('sw-pts-rows')) document.getElementById('sw-pts-rows').innerHTML = '';
-  if (document.getElementById('sw-pts-block')) document.getElementById('sw-pts-block').style.display = 'none';
+  _resetSoftwareForm(true);
   addAuthorRow();
 }
 
 function _swParseBadge(d) {
+  if (d._batchReady) return `<span class="sw-parse-badge ready">${ic('check')} вклад распределён</span>`;
+  if (d._addedToReport) return `<span class="sw-parse-badge ready">${ic('check')} добавлено в отчёт</span>`;
   if (d.already_used) return `<span class="sw-parse-badge used">${ic('warning')} уже подано — в архиве «Поданы»</span>`;
   if (d.in_bank) return `<span class="sw-parse-badge bank">уже в картотеке</span>`;
   return '';
 }
 
+function _resetSoftwareForm(clearUpload) {
+  ['sw-title', 'sw-cert', 'sw-date', 'sw-output'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.value = '';
+  });
+  const authors = document.getElementById('sw-authors-body');
+  if (authors) authors.innerHTML = '';
+  const points = document.getElementById('sw-pts-rows');
+  if (points) points.innerHTML = '';
+  const block = document.getElementById('sw-pts-block');
+  if (block) block.style.display = 'none';
+  const sum = document.getElementById('sw-contrib-sum');
+  if (sum) sum.textContent = '';
+  const fileInput = document.getElementById('sw-file-input');
+  if (fileInput) {
+    if (clearUpload) fileInput.value = '';
+    fileInput._docxFilename = null;
+    fileInput._softwareId = null;
+    fileInput._alreadyUsed = false;
+  }
+}
+
+function _renderSoftwareBatchList() {
+  const pr = document.getElementById('sw-parse-result');
+  const list = pr?._swList || [];
+  if (!pr || !list.length) return;
+  const registerMode = _isSoftwareRegisterMode();
+  const errors = pr._swErrors || [];
+  const errorHtml = errors.length
+    ? `<div class="err-box" style="margin:8px 0">${errors.map(error =>
+        `${_swEsc(error.filename)}: ${_swEsc(error.detail)}`).join('<br>')}</div>`
+    : '';
+
+  let actionHtml = '';
+  if (registerMode) {
+    const pending = list.filter(entry => !entry.already_used && !entry.in_bank);
+    const ready = pending.filter(entry => entry._batchReady && entry._preparedData);
+    actionHtml = pending.length
+      ? `<button class="btn btn-primary btn-sm" style="margin:8px 0 4px" onclick="registerPreparedSoftwareBatch(this)" ${ready.length === pending.length ? '' : 'disabled'}>Зарегистрировать все новые в РИД</button>
+         <div style="font-size:11px;color:var(--text-4);margin-bottom:8px">Распределён вклад: ${ready.length} из ${pending.length}</div>`
+      : `<button class="btn btn-primary btn-sm" style="margin:8px 0 10px" onclick="closeRegisterModal()">Завершить</button>`;
+  } else {
+    const selectable = list.filter(entry => !entry.already_used);
+    const added = selectable.filter(entry => entry._addedToReport);
+    actionHtml = `<button class="btn btn-primary btn-sm" style="margin:8px 0 4px" onclick="finishSoftwareBatchSelection()">Завершить выбор</button>
+      <div style="font-size:11px;color:var(--text-4);margin-bottom:8px">Добавлено в отчёт: ${added.length} из ${selectable.length}</div>`;
+  }
+
+  pr.innerHTML = `<div class="prt">${ic('check')} Распознано ${list.length} ${_plural(list.length, 'программа', 'программы', 'программ')}</div>
+    ${errorHtml}${actionHtml}` + list.map((entry, index) => {
+      const unavailable = entry.already_used || (registerMode && entry.in_bank) || entry._addedToReport;
+      const buttonLabel = entry._batchReady ? 'Изменить' : (entry._addedToReport ? 'Добавлено' : (registerMode && entry.in_bank ? 'В картотеке' : 'Выбрать'));
+      return `<div class="sw-parse-row${entry.already_used ? ' used' : ''}">
+        <div class="sw-parse-info">
+          <div class="sw-parse-title">${_swEsc(entry.title)}</div>
+          <div class="sw-parse-meta">${_swEsc(entry.certificate_number)} · ${_swEsc(entry.registration_date)}${entry.source_filename ? ` · ${_swEsc(entry.source_filename)}` : ''}</div>
+          ${_swParseBadge(entry)}
+        </div>
+        <button class="btn btn-secondary btn-sm" onclick="swSelectEntry(${index})" ${unavailable ? 'disabled' : ''}>${buttonLabel}${unavailable ? '' : ` ${ic('arrowRight')}`}</button>
+      </div>`;
+    }).join('');
+}
+
 async function parseSoftwareFile(input) {
   if (!input.files[0]) return;
   const fd = new FormData();
-  fd.append('file', input.files[0]);
+  Array.from(input.files).forEach(file => fd.append('files', file));
   try {
-    const list = await (await fetch('/api/software/parse', { method: 'POST', body: fd })).json();
-    if (!Array.isArray(list) || !list.length) { alert('Не найдено ни одной программы'); return; }
+    const response = await fetch('/api/software/parse-batch', { method: 'POST', body: fd });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.detail || 'Не удалось обработать документ');
+    const list = payload.entries || [];
+    const errors = payload.errors || [];
+    if (!Array.isArray(list) || !list.length) throw new Error('Не найдено ни одной программы');
 
     const pr = document.getElementById('sw-parse-result');
     if (!pr) return;
     pr.style.display = '';
     pr.className = 'parse-result';
+    pr._swList = list;
+    pr._swErrors = errors;
+    pr._swSelectedIndex = null;
 
     if (list.length === 1) {
       // Single entry — fill form as before
       const d = list[0];
       pr.innerHTML = `<div class="prt">${ic('check')} Распознано из файла</div>
         ${_swParseBadge(d)}
-        <div class="parse-field"><span class="parse-key">Название:</span><span>${d.title}</span></div>
-        <div class="parse-field"><span class="parse-key">№ свидетельства:</span><span>${d.certificate_number}</span></div>
-        <div class="parse-field"><span class="parse-key">Дата:</span><span>${d.registration_date}</span></div>`;
+        <div class="parse-field"><span class="parse-key">Название:</span><span>${_swEsc(d.title)}</span></div>
+        <div class="parse-field"><span class="parse-key">№ свидетельства:</span><span>${_swEsc(d.certificate_number)}</span></div>
+        <div class="parse-field"><span class="parse-key">Дата:</span><span>${_swEsc(d.registration_date)}</span></div>
+        ${errors.length ? `<div class="err-box" style="margin-top:8px">Не обработано файлов: ${errors.length}</div>` : ''}`;
       _fillSwForm(d);
       swMode('manual');
+      if (errors.length) {
+        alert(`Часть файлов не обработана:\n${errors.map(error => `${error.filename}: ${error.detail}`).join('\n')}`);
+      }
     } else {
-      // Multiple entries — show list, each with status + select button
-      pr.innerHTML = `<div class="prt">${ic('check')} Распознано ${list.length} ${_plural(list.length, 'программа', 'программы', 'программ')} из файла</div>` +
-        list.map((d, i) => `
-          <div class="sw-parse-row${d.already_used ? ' used' : ''}">
-            <div class="sw-parse-info">
-              <div class="sw-parse-title">${d.title}</div>
-              <div class="sw-parse-meta">${d.certificate_number} · ${d.registration_date}</div>
-              ${_swParseBadge(d)}
-            </div>
-            <button class="btn btn-secondary btn-sm" onclick="swSelectEntry(${i})" data-idx="${i}">Выбрать ${ic('arrowRight')}</button>
-          </div>`).join('');
-      pr._swList = list;
+      _renderSoftwareBatchList();
+      if (errors.length) {
+        alert(`Часть файлов не обработана:\n${errors.map(error => `${error.filename}: ${error.detail}`).join('\n')}`);
+      }
     }
   } catch(e) { alert('Ошибка парсинга: ' + e.message); }
+}
+
+async function registerPreparedSoftwareBatch(button) {
+  const pr = document.getElementById('sw-parse-result');
+  const list = pr?._swList || [];
+  const pending = list.filter(entry => !entry.already_used && !entry.in_bank);
+  const missing = pending.filter(entry => !entry._batchReady || !entry._preparedData);
+  if (missing.length) {
+    alert(`Сначала распределите вклад для всех новых программ. Осталось: ${missing.length}.`);
+    return;
+  }
+  if (!pending.length) {
+    closeRegisterModal();
+    return;
+  }
+  if (button) button.disabled = true;
+  try {
+    const result = await api('POST', '/software/register-batch', {
+      entries: pending.map(entry => entry._preparedData),
+    });
+    closeRegisterModal();
+    toast(`Зарегистрировано программ: ${result.registered_count || 0}`, 4000);
+    await loadDeposits();
+  } catch (error) {
+    if (button) button.disabled = false;
+    const msg = document.getElementById('register-modal-msg');
+    if (msg) { msg.className = 'err-box'; msg.textContent = error.message; }
+  }
+}
+
+function finishSoftwareBatchSelection() {
+  closePanel();
+}
+
+function _storeSelectedSoftwareInBatch(data, mode) {
+  const pr = document.getElementById('sw-parse-result');
+  const index = pr?._swSelectedIndex;
+  if (!pr || !Number.isInteger(index) || !pr._swList?.[index]) return false;
+  const entry = pr._swList[index];
+  entry.authors = data.authors.map(author => ({ ...author }));
+  entry.points_claimed = data.points_claimed;
+  if (mode === 'register') {
+    entry._preparedData = {
+      ...data,
+      id: null,
+      docx_filename: null,
+      authors: data.authors.map(author => ({ ...author })),
+    };
+    entry._batchReady = true;
+  } else {
+    entry._addedToReport = true;
+  }
+  pr._swSelectedIndex = null;
+  _resetSoftwareForm(false);
+  swMode('upload');
+  _renderSoftwareBatchList();
+  return true;
+}
+
+function stageSelectedSoftwareRegistration(data) {
+  return _storeSelectedSoftwareInBatch(data, 'register');
 }
 
 function swSelectEntry(idx) {
   const pr = document.getElementById('sw-parse-result');
   const d = pr._swList && pr._swList[idx];
-  if (!d) return;
-  _fillSwForm(d);
+  if (!d || d.already_used || (_isSoftwareRegisterMode() && d.in_bank)) return;
+  pr._swSelectedIndex = idx;
+  _fillSwForm(d._preparedData || d);
   swMode('manual');
-  pr.innerHTML = `<div class="prt">${ic('check')} Выбрана программа ${idx + 1}</div>
-    ${_swParseBadge(d)}
-    <div class="parse-field"><span class="parse-key">Название:</span><span>${d.title}</span></div>
-    <div class="parse-field"><span class="parse-key">№ свидетельства:</span><span>${d.certificate_number}</span></div>
-    <div class="parse-field"><span class="parse-key">Дата:</span><span>${d.registration_date}</span></div>
-    <button class="btn btn-secondary btn-sm" style="margin-top:6px" onclick="document.getElementById('sw-file-input').click()">${ic('back')} Другой файл</button>`;
 }
 
 function _fillSwForm(d) {
@@ -339,14 +501,21 @@ function _fillSwForm(d) {
   document.getElementById('sw-cert').value = d.certificate_number || '';
   document.getElementById('sw-date').value = d.registration_date ? isoDate(d.registration_date) : '';
   document.getElementById('sw-output').value = d.output_data || '';
-  if (d.docx_filename) document.getElementById('sw-file-input')._docxFilename = d.docx_filename;
+  const fileInput = document.getElementById('sw-file-input');
+  if (fileInput) {
+    fileInput._docxFilename = d.docx_filename || null;
+    fileInput._softwareId = d.id || d.existing_id || null;
+    fileInput._alreadyUsed = !!d.already_used;
+  }
   const tbody = document.getElementById('sw-authors-body');
   if (tbody) { tbody.innerHTML = ''; (d.authors || []).forEach(a => addAuthorRow(a.full_name, a.position, a.contribution_percent)); }
   recalcSwPts();   // баллы считаются из вклада автоматически
 }
 
 function isoDate(ddmmyyyy) {
-  const m = ddmmyyyy.match(/(\d{2})\.(\d{2})\.(\d{4})/);
+  const value = String(ddmmyyyy || '').trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+  const m = value.match(/(\d{2})[./-](\d{2})[./-](\d{4})/);
   return m ? `${m[3]}-${m[2]}-${m[1]}` : '';
 }
 

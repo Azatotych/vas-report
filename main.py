@@ -31,13 +31,20 @@ from auth import (
     validate_username,
     verify_password,
 )
-from parsers import parse_order_docx, parse_software_docx, parse_article_docx
+from parsers import (
+    certificate_key,
+    normalize_certificate_number,
+    parse_article_docx,
+    parse_order_docx,
+    parse_software_certificate_pdf,
+    parse_software_docx,
+)
 from export import generate_report_xlsx
-from software_doc import generate_software_docx
+from software_doc import generate_software_batch_docx, generate_software_docx
 import plan_calc
 from plan_doc import generate_plan_docx, MONTHS_RU
 
-APP_VERSION = "3.0.0"   # 3.0 — защищённые аккаунты, пароли и серверные сессии
+APP_VERSION = "3.1.1"   # ручное распределение вкладов при пакетном импорте ПО
 
 BASE = Path(__file__).parent
 UPLOADS_DIR = BASE / "uploads"
@@ -47,6 +54,8 @@ UPLOADS_DIR.mkdir(exist_ok=True)
 REPORTS_DIR.mkdir(exist_ok=True)
 LOGS_DIR.mkdir(exist_ok=True)
 MAX_UPLOAD_BYTES = max(1, int(os.environ.get("VAS_MAX_UPLOAD_MB", "20"))) * 1024 * 1024
+MAX_SOFTWARE_BATCH_FILES = 50
+MAX_SOFTWARE_BATCH_BYTES = 100 * 1024 * 1024
 DOCUMENT_UPLOAD_SUFFIXES = {".docx", ".pdf", ".png", ".jpg", ".jpeg", ".webp"}
 
 app = FastAPI(title="ВАС Результативность")
@@ -136,6 +145,29 @@ def _delete_upload(filename: str):
             p.unlink()
     except Exception:
         pass
+
+
+def _delete_upload_if_unreferenced(filename: str):
+    """Delete a document only when no database row still points to it."""
+    if not filename:
+        return
+    conn = get_db()
+    referenced = conn.execute(
+        """
+        SELECT 1 FROM software WHERE docx_filename=?
+        UNION ALL
+        SELECT 1 FROM articles WHERE docx_filename=?
+        UNION ALL
+        SELECT 1 FROM report_orders WHERE confirmation_filename=?
+        UNION ALL
+        SELECT 1 FROM conferences WHERE certificate_filename=?
+        LIMIT 1
+        """,
+        (filename, filename, filename, filename),
+    ).fetchone()
+    conn.close()
+    if not referenced:
+        _delete_upload(filename)
 
 
 def _safe_upload_path(filename: str) -> Path:
@@ -743,6 +775,74 @@ def preview_upload(filename: str, request: Request):
 
 # ── SOFTWARE ──────────────────────────────────────────────────────────────────
 
+
+def _find_user_software_by_certificate(conn, user_id: int, certificate: str):
+    """Find legacy and normalized spellings of the same certificate number."""
+    wanted_key = certificate_key(certificate)
+    if not wanted_key:
+        return None
+    rows = conn.execute(
+        "SELECT id, is_used, certificate_number, docx_filename "
+        "FROM software WHERE user_id=?",
+        (user_id,),
+    ).fetchall()
+    return next(
+        (row for row in rows if certificate_key(row['certificate_number']) == wanted_key),
+        None,
+    )
+
+
+def _validate_software_docx(conn, filename: str | None, user_id: int) -> str | None:
+    """Accept parser uploads or documents already owned by this employee."""
+    if not filename:
+        return None
+    if Path(filename).name != filename or Path(filename).suffix.lower() != '.docx':
+        raise HTTPException(400, "Некорректный файл докладной записки")
+
+    already_owned = conn.execute(
+        "SELECT 1 FROM software WHERE user_id=? AND docx_filename=? LIMIT 1",
+        (user_id, filename),
+    ).fetchone()
+    if already_owned:
+        return filename
+
+    if not filename.startswith(f"sw_{user_id}_"):
+        raise HTTPException(400, "Файл докладной записки не принадлежит пользователю")
+    if not _safe_upload_path(filename).exists():
+        raise HTTPException(400, "Файл докладной записки не найден")
+    return filename
+
+
+def _decorate_software_status(entry: dict, conn, user_id: int):
+    entry['already_used'] = False
+    entry['in_bank'] = False
+    entry['existing_id'] = None
+    certificate = (entry.get('certificate_number') or '').strip()
+    if not certificate:
+        return
+    row = _find_user_software_by_certificate(conn, user_id, certificate)
+    if not row:
+        return
+    entry['existing_id'] = row['id']
+    if row['is_used']:
+        entry['already_used'] = True
+    else:
+        entry['in_bank'] = True
+
+
+def _fill_profile_position(entry: dict, user: dict):
+    last_name = (user.get('last_name') or '').lower().strip()
+    if not last_name:
+        return
+    position = ' '.join(
+        part.strip() for part in (user.get('position') or '', user.get('unit') or '')
+        if part and part.strip()
+    )
+    for author in entry.get('authors', []):
+        tokens = re.split(r'[\s.,]+', (author.get('full_name') or '').lower())
+        if last_name in tokens and not author.get('position'):
+            author['position'] = position
+
 @app.get("/api/software")
 def get_software(request: Request):
     user = _current_user(request)
@@ -774,8 +874,8 @@ def clear_all_software(request: Request):
     conn.execute("DELETE FROM software WHERE user_id=?", (uid,))
     conn.commit()
     conn.close()
-    for f in files:
-        _delete_upload(f['docx_filename'])
+    for filename in {f['docx_filename'] for f in files if f['docx_filename']}:
+        _delete_upload_if_unreferenced(filename)
     return {"ok": True}
 
 
@@ -789,7 +889,7 @@ def delete_software(sw_id: int, request: Request):
     conn.commit()
     conn.close()
     if row:
-        _delete_upload(row['docx_filename'])
+        _delete_upload_if_unreferenced(row['docx_filename'])
     return {"ok": True}
 
 
@@ -808,26 +908,266 @@ async def parse_software_file(request: Request, file: UploadFile = File(...)):
         conn = get_db()
         for entry in results:
             entry['docx_filename'] = filename
-            # уже использовано (подано в отчёт) / уже лежит в картотеке?
-            cert = (entry.get('certificate_number') or '').strip()
-            entry['already_used'] = False
-            entry['in_bank'] = False
-            if cert:
-                row = conn.execute(
-                    "SELECT is_used FROM software WHERE certificate_number=? AND user_id=?",
-                    (cert, user['id'])
-                ).fetchone()
-                if row:
-                    if row['is_used']:
-                        entry['already_used'] = True
-                    else:
-                        entry['in_bank'] = True
+            entry['source_filename'] = file.filename
+            entry['source_type'] = 'docx'
+            _decorate_software_status(entry, conn, user['id'])
         conn.close()
         return results
     except HTTPException:
+        _delete_upload(filename)
         raise
     except Exception as e:
+        _delete_upload(filename)
         raise HTTPException(400, f"Ошибка парсинга: {e}")
+
+
+@app.post("/api/software/parse-batch")
+async def parse_software_batch(request: Request, files: list[UploadFile] = File(...)):
+    """Parse up to 50 PDF certificates and DOCX memos in one request."""
+    user = _current_user(request)
+    if not files:
+        raise HTTPException(400, "Не выбрано ни одного файла")
+    if len(files) > MAX_SOFTWARE_BATCH_FILES:
+        raise HTTPException(400, f"За один раз можно загрузить не более {MAX_SOFTWARE_BATCH_FILES} файлов")
+
+    entries = []
+    errors = []
+    stored_docx = set()
+    total_bytes = 0
+    seen_certificates = set()
+
+    for index, upload in enumerate(files):
+        stored_filename = None
+        try:
+            suffix = Path(upload.filename or '').suffix.lower()
+            content = await _read_upload(upload, {'.docx', '.pdf'})
+            total_bytes += len(content)
+            if total_bytes > MAX_SOFTWARE_BATCH_BYTES:
+                raise HTTPException(413, "Суммарный размер пакета превышает 100 МБ")
+
+            if suffix == '.pdf':
+                parsed_entries = [parse_software_certificate_pdf(content)]
+                for entry in parsed_entries:
+                    _fill_profile_position(entry, user)
+            else:
+                safe_name = re.sub(r'[^\w.\-]', '_', upload.filename or 'document.docx')
+                stored_filename = (
+                    f"sw_{user['id']}_{int(datetime.now().timestamp()*1000)}_"
+                    f"{index}_{safe_name}"
+                )
+                (UPLOADS_DIR / stored_filename).write_bytes(content)
+                stored_docx.add(stored_filename)
+                parsed_entries = parse_software_docx(str(UPLOADS_DIR / stored_filename))
+                if not parsed_entries:
+                    raise ValueError('Не найдено ни одной программы в документе')
+
+            for entry in parsed_entries:
+                cert_key = certificate_key(entry.get('certificate_number', ''))
+                if cert_key and cert_key in seen_certificates:
+                    errors.append({
+                        'filename': upload.filename or '',
+                        'detail': f"Свидетельство {entry.get('certificate_number', '')} повторяется в пакете",
+                    })
+                    continue
+                if cert_key:
+                    seen_certificates.add(cert_key)
+                entry['docx_filename'] = stored_filename
+                entry['source_filename'] = upload.filename or ''
+                entry['source_type'] = suffix.lstrip('.')
+                entries.append(entry)
+        except HTTPException as exc:
+            if stored_filename:
+                stored_docx.discard(stored_filename)
+                _delete_upload(stored_filename)
+            if exc.status_code == 413:
+                for filename in stored_docx:
+                    _delete_upload(filename)
+                raise
+            errors.append({'filename': upload.filename or '', 'detail': str(exc.detail)})
+        except Exception as exc:
+            if stored_filename:
+                stored_docx.discard(stored_filename)
+                _delete_upload(stored_filename)
+            errors.append({'filename': upload.filename or '', 'detail': str(exc)})
+
+    used_docx = {
+        entry['docx_filename'] for entry in entries if entry.get('docx_filename')
+    }
+    for filename in stored_docx - used_docx:
+        _delete_upload(filename)
+
+    conn = get_db()
+    for entry in entries:
+        _decorate_software_status(entry, conn, user['id'])
+    conn.close()
+
+    if not entries:
+        detail = '; '.join(
+            f"{error['filename']}: {error['detail']}" for error in errors
+        ) or 'Не найдено ни одной программы'
+        raise HTTPException(400, detail)
+    return {'entries': entries, 'errors': errors}
+
+
+def _validated_software_batch_entry(raw: dict) -> dict:
+    """Normalize one manually reviewed entry before an atomic batch save."""
+    if not isinstance(raw, dict):
+        raise HTTPException(400, "Некорректная запись ПО")
+    title = str(raw.get('title') or '').strip()
+    certificate = normalize_certificate_number(raw.get('certificate_number', ''))
+    if not title or not certificate:
+        raise HTTPException(400, "Для каждой программы нужны название и номер свидетельства")
+
+    source_authors = raw.get('authors')
+    if not isinstance(source_authors, list) or not source_authors:
+        raise HTTPException(400, f"Для {certificate} не указаны авторы")
+    authors = []
+    total_percent = 0
+    for author in source_authors:
+        if not isinstance(author, dict):
+            raise HTTPException(400, f"Некорректный автор в {certificate}")
+        full_name = str(author.get('full_name') or '').strip()
+        if not full_name:
+            raise HTTPException(400, f"В {certificate} есть автор без ФИО")
+        try:
+            numeric_percent = float(author.get('contribution_percent', 0))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(400, f"Некорректный вклад автора в {certificate}") from exc
+        percent = int(numeric_percent)
+        if numeric_percent != percent or not 0 <= percent <= 100:
+            raise HTTPException(400, f"Вклад каждого автора в {certificate} должен быть целым числом от 0 до 100")
+        total_percent += percent
+        authors.append({
+            'full_name': full_name,
+            'position': str(author.get('position') or '').strip(),
+            'contribution_percent': percent,
+            'points_claimed': round(percent / 100 * 5, 2),
+        })
+    if total_percent != 100:
+        raise HTTPException(400, f"Сумма вкладов авторов в {certificate} должна быть ровно 100%")
+
+    return {
+        'title': title,
+        'certificate_number': certificate,
+        'registration_date': str(raw.get('registration_date') or '').strip(),
+        'output_data': str(raw.get('output_data') or '').strip(),
+        'authors': authors,
+    }
+
+
+@app.post("/api/software/register-batch")
+async def register_software_batch(request: Request):
+    """Save manually reviewed programs together with one up-to-date memo."""
+    user = _current_user(request)
+    payload = await request.json()
+    raw_entries = payload.get('entries') if isinstance(payload, dict) else None
+    if not isinstance(raw_entries, list) or not raw_entries:
+        raise HTTPException(400, "Нет подготовленных программ для регистрации")
+    if len(raw_entries) > MAX_SOFTWARE_BATCH_FILES:
+        raise HTTPException(400, f"За один раз можно зарегистрировать не более {MAX_SOFTWARE_BATCH_FILES} программ")
+
+    entries = [_validated_software_batch_entry(raw) for raw in raw_entries]
+    certificate_keys = [certificate_key(entry['certificate_number']) for entry in entries]
+    if len(set(certificate_keys)) != len(certificate_keys):
+        raise HTTPException(400, "В пакете повторяется номер свидетельства")
+
+    conn = get_db()
+    writable = []
+    skipped = []
+    for entry in entries:
+        existing = _find_user_software_by_certificate(
+            conn, user['id'], entry['certificate_number']
+        )
+        if existing and existing['is_used']:
+            skipped.append({
+                'certificate_number': entry['certificate_number'],
+                'id': existing['id'],
+                'already_used': True,
+            })
+        else:
+            writable.append((entry, existing))
+
+    if not writable:
+        conn.close()
+        return {
+            'ok': True,
+            'registered_count': 0,
+            'results': skipped,
+            'docx_filename': None,
+        }
+
+    memo_entries = [entry for entry, _ in writable]
+    batch_filename = (
+        f"sw_{user['id']}_{int(datetime.now().timestamp()*1000)}_pdf_batch.docx"
+    )
+    batch_path = UPLOADS_DIR / batch_filename
+    old_docx_filenames = set()
+    results = []
+    try:
+        batch_path.write_bytes(generate_software_batch_docx(memo_entries, user))
+        for entry, existing in writable:
+            if existing:
+                sw_id = existing['id']
+                if existing['docx_filename']:
+                    old_docx_filenames.add(existing['docx_filename'])
+                conn.execute(
+                    "UPDATE software SET title=?, certificate_number=?, registration_date=?, "
+                    "output_data=?, docx_filename=? WHERE id=?",
+                    (
+                        entry['title'], entry['certificate_number'],
+                        entry.get('registration_date'), entry.get('output_data', ''),
+                        batch_filename, sw_id,
+                    ),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO software (user_id, title, certificate_number, "
+                    "registration_date, output_data, docx_filename) VALUES (?,?,?,?,?,?)",
+                    (
+                        user['id'], entry['title'], entry['certificate_number'],
+                        entry.get('registration_date'), entry.get('output_data', ''),
+                        batch_filename,
+                    ),
+                )
+                sw_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+            conn.execute("DELETE FROM software_authors WHERE software_id=?", (sw_id,))
+            for author in entry['authors']:
+                conn.execute(
+                    "INSERT INTO software_authors "
+                    "(software_id, full_name, position, contribution_percent, points_claimed) "
+                    "VALUES (?,?,?,?,?)",
+                    (
+                        sw_id, author['full_name'], author['position'],
+                        author['contribution_percent'], author['points_claimed'],
+                    ),
+                )
+            results.append({
+                'certificate_number': entry['certificate_number'],
+                'id': sw_id,
+                'already_used': False,
+            })
+        conn.commit()
+    except HTTPException:
+        conn.rollback()
+        conn.close()
+        _delete_upload(batch_filename)
+        raise
+    except Exception as exc:
+        conn.rollback()
+        conn.close()
+        _delete_upload(batch_filename)
+        raise HTTPException(400, f"Не удалось зарегистрировать пакет ПО: {exc}") from exc
+    conn.close()
+
+    for old_filename in old_docx_filenames - {batch_filename}:
+        _delete_upload_if_unreferenced(old_filename)
+    return {
+        'ok': True,
+        'registered_count': len(results),
+        'results': results + skipped,
+        'docx_filename': batch_filename,
+    }
 
 
 @app.post("/api/software")
@@ -835,17 +1175,21 @@ async def create_software(request: Request):
     user = _current_user(request)
     data = await request.json()
     _require(data, 'title', 'certificate_number')
-    cert = data.get('certificate_number', '').strip()
+    cert = normalize_certificate_number(data.get('certificate_number', ''))
+    data['certificate_number'] = cert
     conn = get_db()
-    existing = conn.execute(
-        "SELECT id, is_used FROM software WHERE certificate_number=? AND user_id=?", (cert, user['id'])
-    ).fetchone()
+    existing = _find_user_software_by_certificate(conn, user['id'], cert)
+    docx_filename = _validate_software_docx(
+        conn, data.get('docx_filename'), user['id']
+    )
     if existing and existing['is_used']:
         # ПО уже подавалось в отчёт — не дублируем в картотеку, остаётся в архиве «Поданы»
         conn.close()
+        if docx_filename and docx_filename != existing['docx_filename']:
+            _delete_upload_if_unreferenced(docx_filename)
         return {"id": existing['id'], "ok": True, "already_used": True}
 
-    docx_filename = data.get('docx_filename')
+    old_docx_filename = existing['docx_filename'] if existing else None
     if not docx_filename:
         docx_bytes = generate_software_docx(data, user)
         safe_cert = re.sub(r'[^\w]', '_', cert)
@@ -855,8 +1199,10 @@ async def create_software(request: Request):
     if existing:
         sw_id = existing['id']
         conn.execute(
-            "UPDATE software SET title=?, registration_date=?, output_data=?, docx_filename=? WHERE id=?",
-            (data['title'], data.get('registration_date'), data.get('output_data', ''), docx_filename, sw_id)
+            "UPDATE software SET title=?, certificate_number=?, registration_date=?, "
+            "output_data=?, docx_filename=? WHERE id=?",
+            (data['title'], cert, data.get('registration_date'),
+             data.get('output_data', ''), docx_filename, sw_id)
         )
     else:
         conn.execute(
@@ -874,6 +1220,8 @@ async def create_software(request: Request):
         )
     conn.commit()
     conn.close()
+    if old_docx_filename and old_docx_filename != docx_filename:
+        _delete_upload_if_unreferenced(old_docx_filename)
     return {"id": sw_id, "ok": True, "docx_filename": docx_filename}
 
 
@@ -1000,7 +1348,7 @@ def delete_article(article_id: int, request: Request):
     conn.commit()
     conn.close()
     if row:
-        _delete_upload(row['docx_filename'])
+        _delete_upload_if_unreferenced(row['docx_filename'])
     return {"ok": True}
 
 
